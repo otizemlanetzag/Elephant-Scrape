@@ -287,10 +287,8 @@ class ElephantApp:
         self.router = StorageRouter()
         self.router.add_provider(self.provider)
 
-        # MVP key: generated for this running installation/session.
-        # A production build should persist it in an OS secure store with
-        # explicit recovery/key-loss behavior.
-        self.vault = Vault.new()
+        self.key_path = self.base / "vault.key"
+        self.vault = self._load_vault()
         self.index = VaultIndex(self.index_path)
 
         self.unencrypted = tk.BooleanVar(value=False)
@@ -362,6 +360,18 @@ class ElephantApp:
             bg="#EFEAE0", fg="#5D4037", wraplength=760, justify="left"
         ).pack(padx=20, pady=5)
 
+    def _load_vault(self):
+        if self.key_path.exists():
+            key = base64.b64decode(self.key_path.read_text(encoding="ascii"))
+            return Vault(key)
+        vault = Vault.new()
+        self.key_path.write_text(base64.b64encode(vault.key).decode("ascii"), encoding="ascii")
+        try:
+            os.chmod(self.key_path, 0o600)
+        except OSError:
+            pass
+        return vault
+
     def _status_text(self):
         free = self.provider.free_bytes()
         return (
@@ -408,6 +418,14 @@ class ElephantApp:
             object_name = hashlib.sha256(os.urandom(32)).hexdigest() + ".es"
 
             if self.unencrypted.get():
+                confirmed = messagebox.askyesno(
+                    "Encryption disabled",
+                    "You chose to store this file without client-side encryption.\n\n"
+                    "The storage provider may be able to read the file. Continue?",
+                    icon="warning",
+                )
+                if not confirmed:
+                    return
                 blob = data
                 encrypted = False
             else:
