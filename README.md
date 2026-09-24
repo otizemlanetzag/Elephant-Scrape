@@ -43,3 +43,17 @@ python elephant_scrape.py
 ```
 
 This is an initial foundation, not a claim that every cloud connector or production P2P path is complete yet.
+
+
+## Implemented MVP behavior
+
+- Client-side AES-256-GCM encryption by default.
+- Persistent local vault key for this installation.
+- Local storage folders can be connected as providers.
+- New files are routed to a provider with sufficient free space, preferring the most available capacity.
+- Encrypted objects keep their original filename inside authenticated encrypted metadata.
+- Unencrypted storage requires an explicit warning confirmation.
+- Download checks classify text/images, code, executables and unknown files with 5/10/20/40 target security layers. The current foundation implements deterministic local checks; additional AV/sandbox layers are still extension points.
+- Anonymous provider recommendations remain disabled by default and are not needed for core storage.
+- The provider interface is designed for future Google Drive, Dropbox, OneDrive and other connectors.
+- P2P sharing is planned as a separate end-to-end encrypted transport layer and is not falsely presented as complete in this MVP.
