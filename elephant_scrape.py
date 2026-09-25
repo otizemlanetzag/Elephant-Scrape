@@ -24,6 +24,116 @@ FORMAT_MAGIC = b"ELEPHANT1"
 CHUNK_SIZE = 1024 * 1024
 
 
+class StorageProvider:
+    """Interface implemented by every storage backend."""
+
+    name = "Unnamed provider"
+
+    def free_bytes(self) -> int:
+        raise NotImplementedError
+
+    def put(self, object_name: str, data: bytes) -> None:
+        raise NotImplementedError
+
+    def get(self, object_name: str) -> bytes:
+        raise NotImplementedError
+
+    def delete(self, object_name: str) -> None:
+        raise NotImplementedError
+
+    def exists(self, object_name: str) -> bool:
+        raise NotImplementedError
+
+
+class WebDAVProvider(StorageProvider):
+    """Generic WebDAV connector for cloud/self-hosted storage services."""
+    def __init__(self, name: str, url: str, username: str, password: str):
+        self.name = name
+        self.url = url.rstrip("/") + "/"
+        self.username = username
+        self.password = password
+
+    def _request(self, method: str, path: str = "", data: bytes | None = None):
+        target = urllib.parse.urljoin(self.url, path)
+        request = urllib.request.Request(target, data=data, method=method)
+        token = b64encode(f"{self.username}:{self.password}".encode()).decode()
+        request.add_header("Authorization", f"Basic {token}")
+        request.add_header("User-Agent", "Elephant-Scrape/1.0")
+        return urllib.request.urlopen(request, timeout=30)
+
+    def free_bytes(self) -> int:
+        # RFC 4331 quota properties are optional; fall back to a conservative
+        # value so the provider remains usable when a server does not expose quota.
+        try:
+            request = urllib.request.Request(self.url, method="PROPFIND")
+            token = b64encode(f"{self.username}:{self.password}".encode()).decode()
+            request.add_header("Authorization", f"Basic {token}")
+            request.add_header("Depth", "0")
+            request.add_header("Content-Type", "application/xml")
+            body = ("<?xml version=\\"1.0\\" encoding=\\"utf-8\\"?>"
+                    "<propfind xmlns=\\"DAV:\\"><prop>"
+                    "<quota-available-bytes/></prop></propfind>").encode()
+            request.data = body
+            with urllib.request.urlopen(request, timeout=15) as response:
+                text = response.read().decode("utf-8", errors="ignore")
+            marker = "<d:quota-available-bytes>"
+            if marker in text:
+                return int(text.split(marker, 1)[1].split("<", 1)[0])
+        except Exception:
+            pass
+        return 1 << 50
+
+    def put(self, object_name: str, data: bytes) -> None:
+        with self._request("PUT", urllib.parse.quote(object_name), data) as response:
+            response.read()
+
+    def get(self, object_name: str) -> bytes:
+        with self._request("GET", urllib.parse.quote(object_name)) as response:
+            return response.read()
+
+    def delete(self, object_name: str) -> None:
+        with self._request("DELETE", urllib.parse.quote(object_name)) as response:
+            response.read()
+
+    def exists(self, object_name: str) -> bool:
+        try:
+            with self._request("HEAD", urllib.parse.quote(object_name)):
+                return True
+        except Exception:
+            return False
+
+
+class LocalFolderProvider(StorageProvider):
+    def __init__(self, name: str, folder: Path):
+        self.name = name
+        self.folder = folder
+        self.folder.mkdir(parents=True, exist_ok=True)
+
+    def free_bytes(self) -> int:
+        return shutil.disk_usage(self.folder).free
+
+    def _safe_path(self, object_name: str) -> Path:
+        # Object names are generated internally and must never contain path separators.
+        if "/" in object_name or "\\" in object_name or object_name in {".", ".."}:
+            raise ValueError("Invalid storage object name")
+        return self.folder / object_name
+
+    def put(self, object_name: str, data: bytes) -> None:
+        target = self._safe_path(object_name)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+
+    def get(self, object_name: str) -> bytes:
+        return self._safe_path(object_name).read_bytes()
+
+    def delete(self, object_name: str) -> None:
+        self._safe_path(object_name).unlink(missing_ok=True)
+
+    def exists(self, object_name: str) -> bool:
+        return self._safe_path(object_name).exists()
+
+
 # -------------------------
 # OAuth cloud connections
 # -------------------------
@@ -287,116 +397,6 @@ class OneDriveProvider(OAuthProvider):
 # Provider abstraction
 # -------------------------
 
-class StorageProvider:
-    """Interface implemented by every storage backend."""
-
-    name = "Unnamed provider"
-
-    def free_bytes(self) -> int:
-        raise NotImplementedError
-
-    def put(self, object_name: str, data: bytes) -> None:
-        raise NotImplementedError
-
-    def get(self, object_name: str) -> bytes:
-        raise NotImplementedError
-
-    def delete(self, object_name: str) -> None:
-        raise NotImplementedError
-
-    def exists(self, object_name: str) -> bool:
-        raise NotImplementedError
-
-
-class WebDAVProvider(StorageProvider):
-    """Generic WebDAV connector for cloud/self-hosted storage services."""
-    def __init__(self, name: str, url: str, username: str, password: str):
-        self.name = name
-        self.url = url.rstrip("/") + "/"
-        self.username = username
-        self.password = password
-
-    def _request(self, method: str, path: str = "", data: bytes | None = None):
-        target = urllib.parse.urljoin(self.url, path)
-        request = urllib.request.Request(target, data=data, method=method)
-        token = b64encode(f"{self.username}:{self.password}".encode()).decode()
-        request.add_header("Authorization", f"Basic {token}")
-        request.add_header("User-Agent", "Elephant-Scrape/1.0")
-        return urllib.request.urlopen(request, timeout=30)
-
-    def free_bytes(self) -> int:
-        # RFC 4331 quota properties are optional; fall back to a conservative
-        # value so the provider remains usable when a server does not expose quota.
-        try:
-            request = urllib.request.Request(self.url, method="PROPFIND")
-            token = b64encode(f"{self.username}:{self.password}".encode()).decode()
-            request.add_header("Authorization", f"Basic {token}")
-            request.add_header("Depth", "0")
-            request.add_header("Content-Type", "application/xml")
-            body = ("<?xml version=\\"1.0\\" encoding=\\"utf-8\\"?>"
-                    "<propfind xmlns=\\"DAV:\\"><prop>"
-                    "<quota-available-bytes/></prop></propfind>").encode()
-            request.data = body
-            with urllib.request.urlopen(request, timeout=15) as response:
-                text = response.read().decode("utf-8", errors="ignore")
-            marker = "<d:quota-available-bytes>"
-            if marker in text:
-                return int(text.split(marker, 1)[1].split("<", 1)[0])
-        except Exception:
-            pass
-        return 1 << 50
-
-    def put(self, object_name: str, data: bytes) -> None:
-        with self._request("PUT", urllib.parse.quote(object_name), data) as response:
-            response.read()
-
-    def get(self, object_name: str) -> bytes:
-        with self._request("GET", urllib.parse.quote(object_name)) as response:
-            return response.read()
-
-    def delete(self, object_name: str) -> None:
-        with self._request("DELETE", urllib.parse.quote(object_name)) as response:
-            response.read()
-
-    def exists(self, object_name: str) -> bool:
-        try:
-            with self._request("HEAD", urllib.parse.quote(object_name)):
-                return True
-        except Exception:
-            return False
-
-
-class LocalFolderProvider(StorageProvider):
-    def __init__(self, name: str, folder: Path):
-        self.name = name
-        self.folder = folder
-        self.folder.mkdir(parents=True, exist_ok=True)
-
-    def free_bytes(self) -> int:
-        return shutil.disk_usage(self.folder).free
-
-    def _safe_path(self, object_name: str) -> Path:
-        # Object names are generated internally and must never contain path separators.
-        if "/" in object_name or "\\" in object_name or object_name in {".", ".."}:
-            raise ValueError("Invalid storage object name")
-        return self.folder / object_name
-
-    def put(self, object_name: str, data: bytes) -> None:
-        target = self._safe_path(object_name)
-        tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, target)
-
-    def get(self, object_name: str) -> bytes:
-        return self._safe_path(object_name).read_bytes()
-
-    def delete(self, object_name: str) -> None:
-        self._safe_path(object_name).unlink(missing_ok=True)
-
-    def exists(self, object_name: str) -> bool:
-        return self._safe_path(object_name).exists()
-
-
 # -------------------------
 # Encryption
 # -------------------------
@@ -497,8 +497,7 @@ class DownloadSecurity:
     EXECUTABLE_EXTENSIONS = {
         ".exe", ".msi", ".com", ".scr", ".bat", ".cmd", ".ps1",
         ".vbs", ".js", ".jar", ".dll", ".sys",
-    }
-    CODE_EXTENSIONS = {
+    }    CODE_EXTENSIONS = {
         ".py", ".rs", ".c", ".h", ".cpp", ".cs", ".java", ".ts",
         ".tsx", ".js", ".jsx", ".go", ".rb", ".php", ".html", ".css",
         ".sh", ".ps1",
@@ -557,11 +556,11 @@ class DownloadSecurity:
     def _signature_check(filename: str, data: bytes) -> bool:
         ext = Path(filename).suffix.lower()
         signatures = {
-            ".png": b"\\x89PNG",
-            ".jpg": b"\\xff\\xd8\\xff",
+            ".png": b"\x89PNG",
+            ".jpg": b"\xff\xd8\xff",
             ".gif": b"GIF8",
             ".pdf": b"%PDF",
-            ".zip": b"PK\\x03\\x04",
+            ".zip": b"PK\x03\x04",
         }
         sig = signatures.get(ext)
         return True if sig is None else data.startswith(sig)
