@@ -70,9 +70,9 @@ class WebDAVProvider(StorageProvider):
             request.add_header("Authorization", f"Basic {token}")
             request.add_header("Depth", "0")
             request.add_header("Content-Type", "application/xml")
-            body = ("<?xml version=\\"1.0\\" encoding=\\"utf-8\\"?>"
-                    "<propfind xmlns=\\"DAV:\\"><prop>"
-                    "<quota-available-bytes/></prop></propfind>").encode()
+            body = ('<?xml version="1.0" encoding="utf-8"?>'
+                    '<propfind xmlns="DAV:"><prop>'
+                    '<quota-available-bytes/></prop></propfind>').encode()
             request.data = body
             with urllib.request.urlopen(request, timeout=15) as response:
                 text = response.read().decode("utf-8", errors="ignore")
