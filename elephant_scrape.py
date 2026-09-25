@@ -236,13 +236,55 @@ class OAuthProvider(StorageProvider):
         self.name = name
         self.token = token
 
+    def _refresh_access_token(self):
+        refresh_token = self.token.get("refresh_token")
+        if not refresh_token:
+            return False
+        endpoints = {
+            "Google Drive": "https://oauth2.googleapis.com/token",
+            "Dropbox": "https://api.dropbox.com/oauth2/token",
+            "OneDrive": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        }
+        endpoint = endpoints.get(self.oauth_name)
+        client_id = self.token.get("client_id")
+        client_secret = self.token.get("client_secret", "")
+        if not endpoint or not client_id:
+            return False
+        data = {
+            "client_id": client_id,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+        if client_secret:
+            data["client_secret"] = client_secret
+        request = urllib.request.Request(
+            endpoint,
+            data=urllib.parse.urlencode(data).encode(),
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            refreshed = json.loads(response.read().decode("utf-8"))
+        self.token["access_token"] = refreshed["access_token"]
+        if "refresh_token" in refreshed:
+            self.token["refresh_token"] = refreshed["refresh_token"]
+        return True
+
     def _json_request(self, url, method="GET", payload=None, headers=None):
-        hdr = {"Authorization": f"Bearer {self.token['access_token']}", "User-Agent": "Elephant-Scrape/1.0"}
-        if headers:
-            hdr.update(headers)
-        request = urllib.request.Request(url, data=payload, method=method, headers=hdr)
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return response.read()
+        def request_once():
+            hdr = {"Authorization": f"Bearer {self.token['access_token']}", "User-Agent": "Elephant-Scrape/1.0"}
+            if headers:
+                hdr.update(headers)
+            request = urllib.request.Request(url, data=payload, method=method, headers=hdr)
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+
+        try:
+            return request_once()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and self._refresh_access_token():
+                return request_once()
+            raise
 
     def free_bytes(self):
         return 1 << 50
@@ -729,13 +771,18 @@ class ElephantApp:
                     if path.resolve() != self.local_storage.resolve():
                         self.router.add_provider(LocalFolderProvider(item["name"], path))
                 elif item.get("type") == "oauth":
-                    p=item.get("provider")
-                    if p=="Google Drive":
-                        self.router.add_provider(GoogleDriveProvider(item["name"], item["token"], item.get("objects", {})))
-                    elif p=="Dropbox":
-                        self.router.add_provider(DropboxProvider(item["name"], item["token"], item.get("objects", {})))
-                    elif p=="OneDrive":
-                        self.router.add_provider(OneDriveProvider(item["name"], item["token"], item.get("objects", {})))
+                    p = item.get("provider")
+                    token = item.get("token", {})
+                    provider_class = {
+                        "Google Drive": GoogleDriveProvider,
+                        "Dropbox": DropboxProvider,
+                        "OneDrive": OneDriveProvider,
+                    }.get(p)
+                    if provider_class and token.get("access_token"):
+                        obj = provider_class(item["name"], token, item.get("objects", {}))
+                        # Reconnect automatically at startup. If the access token
+                        # has expired, the provider will refresh it on first request.
+                        self.router.add_provider(obj)
                 elif item.get("type") == "webdav":
                     self.router.add_provider(WebDAVProvider(
                         item["name"], item["url"], item["username"], item["password"]
