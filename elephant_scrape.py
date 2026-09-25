@@ -497,7 +497,8 @@ class DownloadSecurity:
     EXECUTABLE_EXTENSIONS = {
         ".exe", ".msi", ".com", ".scr", ".bat", ".cmd", ".ps1",
         ".vbs", ".js", ".jar", ".dll", ".sys",
-    }    CODE_EXTENSIONS = {
+    }
+    CODE_EXTENSIONS = {
         ".py", ".rs", ".c", ".h", ".cpp", ".cs", ".java", ".ts",
         ".tsx", ".js", ".jsx", ".go", ".rb", ".php", ".html", ".css",
         ".sh", ".ps1",
