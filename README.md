@@ -1,4 +1,5 @@
-# Elephant Scrape 🐘
+# Elephant Scrape 
+![LOGO]([![image-CFv-MZtblh-Va4oo5BFz8p-Z-slot-0.webp](https://i.postimg.cc/2jnszCgR/image-CFv-MZtblh-Va4oo5BFz8p-Z-slot-0.webp)](https://postimg.cc/F1sWpX9D))
 
 Elephant Scrape is a privacy-first unified storage layer.
 
