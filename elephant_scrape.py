@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import webbrowser
+import tkinter.simpledialog as simpledialog
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -665,67 +666,267 @@ class ElephantApp:
 
     def _build(self):
         style = ttk.Style()
-        style.configure("TButton", padding=8)
+        style.configure("TButton", padding=7)
         style.configure("TLabel", background="#F5F2EB", foreground="#3E2723")
-        style.configure("TCheckbutton", background="#F5F2EB", foreground="#3E2723")
+        style.configure("Treeview", rowheight=28, font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
 
-        title = tk.Label(
-            self.root, text="Elephant Scrape", font=("Segoe UI", 28, "bold"),
-            bg="#F5F2EB", fg="#3E2723"
-        )
-        title.pack(pady=(28, 4))
+        header = tk.Frame(self.root, bg="#F5F2EB")
+        header.pack(fill="x", padx=24, pady=(18, 8))
+        tk.Label(header, text="Elephant Scrape", font=("Segoe UI", 24, "bold"),
+                 bg="#F5F2EB", fg="#3E2723").pack(side="left")
+        tk.Label(header, text="Unified file storage", font=("Segoe UI", 11),
+                 bg="#F5F2EB", fg="#5D4037").pack(side="left", padx=15, pady=(9, 0))
 
-        subtitle = tk.Label(
-            self.root,
-            text="One storage space across the places you choose.",
-            font=("Segoe UI", 12),
-            bg="#F5F2EB", fg="#5D4037"
-        )
-        subtitle.pack(pady=(0, 20))
+        toolbar = tk.Frame(self.root, bg="#EFEAE0", bd=1, relief="solid")
+        toolbar.pack(fill="x", padx=24, pady=5)
+        for text, command in (
+            ("Upload", self.upload),
+            ("New folder", self.new_folder),
+            ("Download", self.download),
+            ("Rename", self.rename_item),
+            ("Delete", self.delete_item),
+            ("Refresh", self.refresh_files),
+            ("Connect storage", self.add_storage),
+        ):
+            ttk.Button(toolbar, text=text, command=command).pack(side="left", padx=4, pady=7)
 
-        frame = tk.Frame(self.root, bg="#EFEAE0", bd=1, relief="solid")
-        frame.pack(fill="both", expand=True, padx=35, pady=10)
+        search_frame = tk.Frame(self.root, bg="#F5F2EB")
+        search_frame.pack(fill="x", padx=24, pady=8)
+        tk.Label(search_frame, text="Search:", bg="#F5F2EB", fg="#3E2723").pack(side="left")
+        self.search_var = tk.StringVar()
+        search = tk.Entry(search_frame, textvariable=self.search_var, relief="solid")
+        search.pack(side="left", fill="x", expand=True, padx=8)
+        search.bind("<Return>", lambda _event: self.refresh_files())
+        ttk.Button(search_frame, text="Search", command=self.refresh_files).pack(side="left")
+
+        main = tk.Frame(self.root, bg="#F5F2EB")
+        main.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+
+        left = tk.Frame(main, bg="#EFEAE0", bd=1, relief="solid", width=210)
+        left.pack(side="left", fill="y", padx=(0, 8))
+        left.pack_propagate(False)
+        tk.Label(left, text="Storage", font=("Segoe UI", 11, "bold"),
+                 bg="#EFEAE0", fg="#3E2723").pack(anchor="w", padx=12, pady=10)
+        self.provider_list = tk.Listbox(left, bg="#EFEAE0", fg="#3E2723",
+                                        relief="flat", highlightthickness=0)
+        self.provider_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.provider_list.bind("<<ListboxSelect>>", lambda _e: self.refresh_files())
+
+        right = tk.Frame(main, bg="#F5F2EB")
+        right.pack(side="left", fill="both", expand=True)
+        columns = ("name", "size", "modified", "provider", "type")
+        self.file_tree = ttk.Treeview(right, columns=columns, show="headings", selectmode="extended")
+        headings = {"name":"Name", "size":"Size", "modified":"Modified", "provider":"Storage", "type":"Type"}
+        widths = {"name":340, "size":100, "modified":155, "provider":150, "type":90}
+        for col in columns:
+            self.file_tree.heading(col, text=headings[col])
+            self.file_tree.column(col, width=widths[col], anchor="w")
+        yscroll = ttk.Scrollbar(right, orient="vertical", command=self.file_tree.yview)
+        xscroll = ttk.Scrollbar(right, orient="horizontal", command=self.file_tree.xview)
+        self.file_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.file_tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        right.grid_rowconfigure(0, weight=1)
+        right.grid_columnconfigure(0, weight=1)
+        self.file_tree.bind("<Double-1>", self.open_item)
+        self.file_tree.bind("<Delete>", lambda _e: self.delete_item())
 
         self.status = tk.StringVar(value=self._status_text())
-        tk.Label(
-            frame, textvariable=self.status, justify="left", anchor="w",
-            bg="#EFEAE0", fg="#3E2723", font=("Segoe UI", 11)
-        ).pack(fill="x", padx=20, pady=20)
+        tk.Label(self.root, textvariable=self.status, anchor="w",
+                 bg="#EFEAE0", fg="#3E2723", bd=1, relief="solid",
+                 font=("Segoe UI", 10)).pack(fill="x", padx=24, pady=(0, 14))
 
-        buttons = tk.Frame(frame, bg="#EFEAE0")
-        buttons.pack(pady=5)
+        self.refresh_provider_list()
+        self.refresh_files()
 
-        ttk.Button(buttons, text="Upload file", command=self.upload).grid(row=0, column=0, padx=8)
-        ttk.Button(buttons, text="Download file", command=self.download).grid(row=0, column=1, padx=8)
-        ttk.Button(buttons, text="Connect storage", command=self.add_storage).grid(row=0, column=2, padx=8)
+    def refresh_provider_list(self):
+        self.provider_list.delete(0, "end")
+        self.provider_list.insert("end", "All storage")
+        for provider in self.router.providers:
+            self.provider_list.insert("end", provider.name)
 
-        settings = tk.Frame(frame, bg="#EFEAE0")
-        settings.pack(fill="x", padx=20, pady=25)
+    def _format_size(self, size):
+        size = float(size)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024 or unit == "TB":
+                return f"{size:.1f} {unit}"
+            size /= 1024
 
-        ttk.Checkbutton(
-            settings, text="Store new files unencrypted (user responsibility)",
-            variable=self.unencrypted
-        ).pack(anchor="w", pady=5)
+    def _provider_for_selection(self):
+        selection = self.provider_list.curselection()
+        if not selection or selection[0] == 0:
+            return None
+        index = selection[0] - 1
+        return self.router.providers[index] if index < len(self.router.providers) else None
 
-        ttk.Checkbutton(
-            settings, text="Enable anonymous provider recommendations (off by default)",
-            variable=self.recommendations,
-            command=self.recommendation_changed
-        ).pack(anchor="w", pady=5)
+    def _list_provider_items(self, provider):
+        items = []
+        if isinstance(provider, LocalFolderProvider):
+            provider.folder.mkdir(parents=True, exist_ok=True)
+            for p in provider.folder.iterdir():
+                items.append({
+                    "name": p.name,
+                    "size": p.stat().st_size if p.is_file() else 0,
+                    "modified": p.stat().st_mtime,
+                    "provider": provider.name,
+                    "type": "Folder" if p.is_dir() else p.suffix.lower() or "File",
+                    "object": p,
+                })
+        else:
+            # Cloud providers use their existing object maps as the first
+            # unified file-manager view. Provider APIs can expand this later.
+            mapping = getattr(provider, "_ids", getattr(provider, "_paths", {}))
+            for name, object_id in mapping.items():
+                items.append({
+                    "name": name,
+                    "size": 0,
+                    "modified": 0,
+                    "provider": provider.name,
+                    "type": "Cloud object",
+                    "object": object_id,
+                })
+        return items
 
-        tk.Label(
-            frame,
-            text="Security targets: 5 layers for text/images · 10 for code · "
-                 "20 for executables · 40 for unknown types",
-            bg="#EFEAE0", fg="#5D4037", wraplength=760, justify="left"
-        ).pack(padx=20, pady=15)
+    def refresh_files(self):
+        if not hasattr(self, "file_tree"):
+            return
+        self.file_tree.delete(*self.file_tree.get_children())
+        selected_provider = self._provider_for_selection()
+        providers = [selected_provider] if selected_provider else list(self.router.providers)
+        query = self.search_var.get().strip().lower() if hasattr(self, "search_var") else ""
+        count = 0
+        for provider in providers:
+            if provider is None:
+                continue
+            try:
+                for item in self._list_provider_items(provider):
+                    if query and query not in item["name"].lower():
+                        continue
+                    iid = self.file_tree.insert("", "end", values=(
+                        item["name"],
+                        self._format_size(item["size"]),
+                        ("-" if not item["modified"] else __import__("datetime").datetime.fromtimestamp(item["modified"]).strftime("%Y-%m-%d %H:%M")),
+                        item["provider"],
+                        item["type"],
+                    ))
+                    self.file_tree.item(iid, tags=("item",))
+                    self.file_tree.set(iid, "name", item["name"])
+                    self.file_tree.item(iid, values=(
+                        item["name"], self._format_size(item["size"]),
+                        ("-" if not item["modified"] else __import__("datetime").datetime.fromtimestamp(item["modified"]).strftime("%Y-%m-%d %H:%M")),
+                        item["provider"], item["type"]))
+                    count += 1
+            except Exception:
+                continue
+        self.status.set(f"{count} items · {len(self.router.providers)} storage providers")
 
-        tk.Label(
-            frame,
-            text="P2P sharing is reserved for the next transport layer. "
-                 "The design keeps provider storage and P2P transfer separate.",
-            bg="#EFEAE0", fg="#5D4037", wraplength=760, justify="left"
-        ).pack(padx=20, pady=5)
+    def _selected_items(self):
+        result = []
+        for iid in self.file_tree.selection():
+            values = self.file_tree.item(iid, "values")
+            if values:
+                result.append(values)
+        return result
+
+    def upload(self):
+        paths = filedialog.askopenfilenames(title="Select files to upload")
+        if not paths:
+            return
+        for filename in paths:
+            data = Path(filename).read_bytes()
+            try:
+                placements = self.router.put(Path(filename).name, data)
+                self.index.items[Path(filename).name] = {"placements": [p.provider.name for p in placements]}
+            except Exception as exc:
+                messagebox.showerror("Upload failed", str(exc), parent=self.root)
+                return
+        self.index.save()
+        self.refresh_files()
+
+    def download(self):
+        selected = self._selected_items()
+        if not selected:
+            messagebox.showinfo("Download", "Select a file first.", parent=self.root)
+            return
+        name = selected[0][0]
+        target = filedialog.asksaveasfilename(initialfile=name, title="Save downloaded file as")
+        if not target:
+            return
+        try:
+            data = self.router.get(name)
+            Path(target).write_bytes(data)
+            messagebox.showinfo("Download", f"Saved: {target}", parent=self.root)
+        except Exception as exc:
+            messagebox.showerror("Download failed", str(exc), parent=self.root)
+
+    def new_folder(self):
+        selected_provider = self._provider_for_selection()
+        if not isinstance(selected_provider, LocalFolderProvider):
+            messagebox.showinfo("New folder", "Select a local storage provider to create a folder.", parent=self.root)
+            return
+        name = simpledialog.askstring("New folder", "Folder name:", parent=self.root)
+        if not name:
+            return
+        try:
+            (selected_provider.folder / name).mkdir(parents=False, exist_ok=False)
+            self.refresh_files()
+        except Exception as exc:
+            messagebox.showerror("New folder failed", str(exc), parent=self.root)
+
+    def rename_item(self):
+        selected = self._selected_items()
+        if not selected:
+            return
+        old = selected[0][0]
+        new = tk.simpledialog.askstring("Rename", "New name:", initialvalue=old, parent=self.root)
+        if not new:
+            return
+        provider = self._provider_for_selection()
+        if isinstance(provider, LocalFolderProvider):
+            source = provider.folder / old
+            source.rename(provider.folder / new)
+            self.refresh_files()
+        else:
+            messagebox.showinfo("Rename", "Cloud-provider rename will be enabled with provider-specific API support.", parent=self.root)
+
+    def delete_item(self):
+        selected = self._selected_items()
+        if not selected:
+            return
+        if not messagebox.askyesno("Delete", f"Delete '{selected[0][0]}'?", parent=self.root):
+            return
+        provider = self._provider_for_selection()
+        if isinstance(provider, LocalFolderProvider):
+            target = provider.folder / selected[0][0]
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                self.refresh_files()
+            except Exception as exc:
+                messagebox.showerror("Delete failed", str(exc), parent=self.root)
+        else:
+            messagebox.showinfo("Delete", "Cloud-provider deletion will be enabled with provider-specific API support.", parent=self.root)
+
+    def open_item(self, _event=None):
+        selected = self._selected_items()
+        if not selected:
+            return
+        name = selected[0][0]
+        provider = self._provider_for_selection()
+        if isinstance(provider, LocalFolderProvider):
+            path = provider.folder / name
+            if path.is_dir():
+                self.provider_list.selection_clear(0, "end")
+                self.refresh_files()
+            elif path.is_file():
+                try:
+                    os.startfile(path)
+                except Exception:
+                    pass
 
     def _load_vault(self):
         if self.key_path.exists():
@@ -998,48 +1199,3 @@ class ElephantApp:
 
             destination = filedialog.asksaveasfilename(
                 title="Save file", initialfile=filename
-            )
-            if not destination:
-                return
-
-            Path(destination).write_bytes(data)
-            messagebox.showinfo("Download complete", "The file was saved to your device.")
-        except Exception as exc:
-            messagebox.showerror("Download failed", str(exc))
-
-    def _choose_object(self, objects):
-        win = tk.Toplevel(self.root)
-        win.title("Choose file")
-        win.geometry("600x360")
-        result = {"value": None}
-
-        tk.Label(
-            win, text="Choose a stored object:",
-            font=("Segoe UI", 12, "bold")
-        ).pack(pady=10)
-
-        lb = tk.Listbox(win, height=12)
-        lb.pack(fill="both", expand=True, padx=20)
-
-        for obj in objects:
-            record = self.index.items[obj]
-            label = record.get("filename_hint") or f"Encrypted object {obj[:12]}…"
-            lb.insert("end", f"{label} — {record['provider']}")
-
-        def accept():
-            sel = lb.curselection()
-            if sel:
-                result["value"] = objects[sel[0]]
-                win.destroy()
-
-        ttk.Button(win, text="Select", command=accept).pack(pady=12)
-        win.transient(self.root)
-        win.grab_set()
-        self.root.wait_window(win)
-        return result["value"]
-
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    ElephantApp(root)
-    root.mainloop()
