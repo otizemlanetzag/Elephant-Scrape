@@ -6,6 +6,9 @@ import shutil
 import struct
 import tempfile
 import tkinter as tk
+import urllib.parse
+import urllib.request
+from base64 import b64encode
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -41,6 +44,64 @@ class StorageProvider:
 
     def exists(self, object_name: str) -> bool:
         raise NotImplementedError
+
+
+class WebDAVProvider(StorageProvider):
+    """Generic WebDAV connector for cloud/self-hosted storage services."""
+    def __init__(self, name: str, url: str, username: str, password: str):
+        self.name = name
+        self.url = url.rstrip("/") + "/"
+        self.username = username
+        self.password = password
+
+    def _request(self, method: str, path: str = "", data: bytes | None = None):
+        target = urllib.parse.urljoin(self.url, path)
+        request = urllib.request.Request(target, data=data, method=method)
+        token = b64encode(f"{self.username}:{self.password}".encode()).decode()
+        request.add_header("Authorization", f"Basic {token}")
+        request.add_header("User-Agent", "Elephant-Scrape/1.0")
+        return urllib.request.urlopen(request, timeout=30)
+
+    def free_bytes(self) -> int:
+        # RFC 4331 quota properties are optional; fall back to a conservative
+        # value so the provider remains usable when a server does not expose quota.
+        try:
+            request = urllib.request.Request(self.url, method="PROPFIND")
+            token = b64encode(f"{self.username}:{self.password}".encode()).decode()
+            request.add_header("Authorization", f"Basic {token}")
+            request.add_header("Depth", "0")
+            request.add_header("Content-Type", "application/xml")
+            body = ("<?xml version=\\"1.0\\" encoding=\\"utf-8\\"?>"
+                    "<propfind xmlns=\\"DAV:\\"><prop>"
+                    "<quota-available-bytes/></prop></propfind>").encode()
+            request.data = body
+            with urllib.request.urlopen(request, timeout=15) as response:
+                text = response.read().decode("utf-8", errors="ignore")
+            marker = "<d:quota-available-bytes>"
+            if marker in text:
+                return int(text.split(marker, 1)[1].split("<", 1)[0])
+        except Exception:
+            pass
+        return 1 << 50
+
+    def put(self, object_name: str, data: bytes) -> None:
+        with self._request("PUT", urllib.parse.quote(object_name), data) as response:
+            response.read()
+
+    def get(self, object_name: str) -> bytes:
+        with self._request("GET", urllib.parse.quote(object_name)) as response:
+            return response.read()
+
+    def delete(self, object_name: str) -> None:
+        with self._request("DELETE", urllib.parse.quote(object_name)) as response:
+            response.read()
+
+    def exists(self, object_name: str) -> bool:
+        try:
+            with self._request("HEAD", urllib.parse.quote(object_name)):
+                return True
+        except Exception:
+            return False
 
 
 class LocalFolderProvider(StorageProvider):
@@ -286,6 +347,8 @@ class ElephantApp:
         self.provider = LocalFolderProvider("Computer storage", self.local_storage)
         self.router = StorageRouter()
         self.router.add_provider(self.provider)
+        self.provider_config = self.base / "providers.json"
+        self._load_connected_providers()
 
         self.key_path = self.base / "vault.key"
         self.vault = self._load_vault()
@@ -330,7 +393,7 @@ class ElephantApp:
 
         ttk.Button(buttons, text="Upload file", command=self.upload).grid(row=0, column=0, padx=8)
         ttk.Button(buttons, text="Download file", command=self.download).grid(row=0, column=1, padx=8)
-        ttk.Button(buttons, text="Add storage folder", command=self.add_folder).grid(row=0, column=2, padx=8)
+        ttk.Button(buttons, text="Connect storage", command=self.add_storage).grid(row=0, column=2, padx=8)
 
         settings = tk.Frame(frame, bg="#EFEAE0")
         settings.pack(fill="x", padx=20, pady=25)
@@ -393,12 +456,105 @@ class ElephantApp:
             "future recommendation service."
         )
 
+    def _load_connected_providers(self):
+        if not self.provider_config.exists():
+            return
+        try:
+            configs = json.loads(self.provider_config.read_text(encoding="utf-8"))
+            for item in configs:
+                if item.get("type") == "local":
+                    path = Path(item["folder"])
+                    if path.resolve() != self.local_storage.resolve():
+                        self.router.add_provider(LocalFolderProvider(item["name"], path))
+                elif item.get("type") == "webdav":
+                    self.router.add_provider(WebDAVProvider(
+                        item["name"], item["url"], item["username"], item["password"]
+                    ))
+        except Exception as exc:
+            messagebox.showwarning("Provider configuration", f"Could not load a storage connection:\\n{exc}")
+
+    def _save_connected_providers(self):
+        configs = []
+        for provider in self.router.providers:
+            if isinstance(provider, LocalFolderProvider):
+                configs.append({"type": "local", "name": provider.name, "folder": str(provider.folder)})
+            elif isinstance(provider, WebDAVProvider):
+                configs.append({
+                    "type": "webdav", "name": provider.name, "url": provider.url,
+                    "username": provider.username, "password": provider.password,
+                })
+        tmp = self.provider_config.with_suffix(".tmp")
+        tmp.write_text(json.dumps(configs, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.provider_config)
+        try:
+            os.chmod(self.provider_config, 0o600)
+        except OSError:
+            pass
+
+    def add_storage(self):
+        win = tk.Toplevel(self.root)
+        win.title("Connect storage")
+        win.geometry("560x430")
+        win.transient(self.root)
+        win.grab_set()
+        frame = tk.Frame(win, bg="#F5F2EB")
+        frame.pack(fill="both", expand=True, padx=20, pady=20)
+        tk.Label(frame, text="Connect storage", font=("Segoe UI", 18, "bold"), bg="#F5F2EB", fg="#3E2723").pack(anchor="w")
+        tk.Label(frame, text="Elephant Scrape is a desktop app. Connections are stored locally on this computer.",
+                 wraplength=500, justify="left", bg="#F5F2EB", fg="#5D4037").pack(anchor="w", pady=(5,15))
+        kind = tk.StringVar(value="local")
+        tk.Radiobutton(frame, text="Computer folder", variable=kind, value="local", bg="#F5F2EB").pack(anchor="w")
+        tk.Radiobutton(frame, text="WebDAV / compatible cloud storage", variable=kind, value="webdav", bg="#F5F2EB").pack(anchor="w")
+        fields = tk.Frame(frame, bg="#F5F2EB")
+        fields.pack(fill="x", pady=15)
+        labels = ["Name", "WebDAV URL", "Username", "Password"]
+        entries = {}
+        for label in labels:
+            tk.Label(fields, text=label, bg="#F5F2EB", fg="#3E2723").pack(anchor="w")
+            entry = tk.Entry(fields, show="*" if label == "Password" else "")
+            entry.pack(fill="x", pady=(0,7))
+            entries[label] = entry
+        def update_state(*_):
+            is_dav = kind.get() == "webdav"
+            for label in labels[1:]:
+                state = "normal" if is_dav else "disabled"
+                entries[label].configure(state=state)
+        kind.trace_add("write", update_state)
+        update_state()
+        def connect():
+            name = entries["Name"].get().strip() or "Storage"
+            if kind.get() == "local":
+                folder = filedialog.askdirectory(parent=win, title="Choose a storage folder")
+                if not folder:
+                    return
+                provider = LocalFolderProvider(name, Path(folder))
+            else:
+                url = entries["WebDAV URL"].get().strip()
+                username = entries["Username"].get()
+                password = entries["Password"].get()
+                if not url or not username:
+                    messagebox.showerror("Connection", "WebDAV URL and username are required.", parent=win)
+                    return
+                provider = WebDAVProvider(name, url, username, password)
+                try:
+                    provider.free_bytes()
+                except Exception as exc:
+                    messagebox.showerror("Connection", f"Could not reach the storage:\\n{exc}", parent=win)
+                    return
+            self.router.add_provider(provider)
+            self._save_connected_providers()
+            self.refresh()
+            win.destroy()
+            messagebox.showinfo("Storage connected", f"Connected: {provider.name}")
+        ttk.Button(frame, text="Connect", command=connect).pack(anchor="e", pady=10)
+
     def add_folder(self):
         folder = filedialog.askdirectory(title="Choose a storage folder")
         if not folder:
             return
         name = Path(folder).name or "Storage"
         self.router.add_provider(LocalFolderProvider(name, Path(folder)))
+        self._save_connected_providers()
         self.refresh()
         messagebox.showinfo("Storage added", f"Added: {name}")
 
