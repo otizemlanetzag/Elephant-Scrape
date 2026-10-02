@@ -88,9 +88,12 @@ def vercel_dispatch():
         return index()
     if path == "/api/me" and request.method == "GET":
         return api_me()
-    match = re.fullmatch(r"/render/google/([A-Za-z0-9_-]+)", path)
+    match = re.fullmatch(r"/site/google/([A-Za-z0-9_-]+)", path)
     if match and request.method == "GET":
-        return render_google_file(match.group(1))
+        return render_google_site(match.group(1))
+    match = re.fullmatch(r"/site/local/([^/]+)", path)
+    if match and request.method == "GET":
+        return render_local_site(match.group(1))
     if path == "/api/files" and request.method == "GET":
         return api_files()
     if path == "/api/files" and request.method == "POST":
@@ -160,6 +163,37 @@ def oauth_callback():
     save_connections(CONNECTIONS, items)
     return redirect("/?connected=" + urllib.parse.quote(OAUTH[provider]["name"]))
 
+def html_content_type(name: str) -> str | None:
+    lower = name.lower()
+    if lower.endswith((".html", ".htm")):
+        return "text/html; charset=utf-8"
+    if lower.endswith(".css"):
+        return "text/css; charset=utf-8"
+    if lower.endswith(".js"):
+        return "text/javascript; charset=utf-8"
+    if lower.endswith(".json"):
+        return "application/json; charset=utf-8"
+    if lower.endswith((".svg",)):
+        return "image/svg+xml"
+    return None
+
+def browser_site_response(data: bytes, name: str) -> Response:
+    content_type = html_content_type(name)
+    if not content_type:
+        abort(415, "This stored file is not a browser site resource.")
+    response = Response(data, content_type=content_type)
+    response.headers["Content-Disposition"] = "inline; filename*=UTF-8''" + urllib.parse.quote(name or "index.html")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = (
+        "sandbox allow-scripts allow-forms allow-popups; "
+        "default-src 'self' https: data: blob:; "
+        "img-src 'self' https: data: blob:; "
+        "style-src 'self' https: 'unsafe-inline'; "
+        "script-src 'self' https: 'unsafe-inline' 'unsafe-eval'; "
+        "connect-src https:; frame-src https:;"
+    )
+    return response
+
 def google_connection_token():
     for item in load_connections(CONNECTIONS):
         if item.get("provider") == "google":
@@ -172,27 +206,24 @@ def google_connection_token():
                 return raw
     return None
 
-@app.get("/render/google/<file_id>")
-def render_google_file(file_id):
+@app.get("/site/google/<file_id>")
+def render_google_site(file_id):
     token = google_connection_token()
     if not token:
         abort(401, "Connect Google Drive first.")
-    # The ID is an internal Drive resource identifier; users never have to enter it.
     meta_req = urllib.request.Request(
         "https://www.googleapis.com/drive/v3/files/" + urllib.parse.quote(file_id, safe="") +
-        "?fields=id,name,mimeType,size,capabilities",
+        "?fields=id,name,mimeType,size",
         headers={"Authorization": "Bearer " + token},
     )
     try:
         with urllib.request.urlopen(meta_req, timeout=30) as response:
             meta = json.loads(response.read().decode("utf-8"))
     except Exception:
-        abort(404, "Google Drive file could not be read.")
-    mime = meta.get("mimeType", "application/octet-stream")
-    if mime == "application/vnd.google-apps.document":
-        abort(415, "This is a Google Docs document, not an HTML file.")
-    if mime != "text/html" and not str(meta.get("name", "")).lower().endswith((".html", ".htm")):
-        abort(415, "This file is not HTML.")
+        abort(404, "Stored file could not be read.")
+    name = meta.get("name", "index.html")
+    if meta.get("mimeType") == "application/vnd.google-apps.document":
+        abort(415, "This is a Google Docs document, not an HTML site file.")
     data_req = urllib.request.Request(
         "https://www.googleapis.com/drive/v3/files/" + urllib.parse.quote(file_id, safe="") + "?alt=media",
         headers={"Authorization": "Bearer " + token},
@@ -201,13 +232,16 @@ def render_google_file(file_id):
         with urllib.request.urlopen(data_req, timeout=60) as response:
             data = response.read()
     except Exception:
-        abort(404, "Google Drive file content could not be downloaded.")
-    response = Response(data, content_type="text/html; charset=utf-8")
-    response.headers["Content-Disposition"] = "inline; filename*=UTF-8''" + urllib.parse.quote(meta.get("name", "index.html"))
-    # Render HTML as an isolated document so downloaded pages cannot read Elephant Scrape cookies/app DOM.
-    response.headers["Content-Security-Policy"] = "sandbox allow-scripts allow-forms allow-popups; default-src 'self' https: data: blob:; img-src 'self' https: data: blob:; style-src 'self' https: 'unsafe-inline'; script-src 'self' https: 'unsafe-inline' 'unsafe-eval'; connect-src https:; frame-src https:;"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    return response
+        abort(404, "Stored file content could not be downloaded.")
+    return browser_site_response(data, name)
+
+@app.get("/site/local/<file_name>")
+def render_local_site(file_name):
+    # Local storage is another provider: files are stored by Elephant Scrape itself.
+    path = user_dir() / file_name
+    if not path.is_file() or path.parent != user_dir():
+        abort(404)
+    return browser_site_response(path.read_bytes(), path.name)
 
 @app.get("/api/me")
 def api_me():
