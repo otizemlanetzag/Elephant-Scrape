@@ -30,7 +30,28 @@ Then open `http://127.0.0.1:5000`.
 
 Set `ELEPHANT_SESSION_SECRET` to a long random secret for a stable deployment.
 
-### Storage note
+### Cloud connections
+
+The Web app uses **connections, not provider IDs**.
+
+- **Google Drive / Dropbox / OneDrive:** click **Connect** and sign in normally through the provider.
+- No client ID or folder ID is entered by the user.
+- An existing provider token can also be supplied through **Connect token**.
+- Tokens are encrypted at rest with `ELEPHANT_SERVER_KEY`.
+- OAuth requires the corresponding server-side provider credentials:
+  - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+  - `DROPBOX_CLIENT_ID` / `DROPBOX_CLIENT_SECRET`
+  - `ONEDRIVE_CLIENT_ID` / `ONEDRIVE_CLIENT_SECRET`
+- `ELEPHANT_SERVER_KEY` must be a Fernet key. Generate one with Python:
+
+```python
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+```
+
+The user experience remains simple: **Connections → Connect → provider login → connected**.
+
+## Storage note
 
 The Web MVP currently uses the server filesystem as its storage provider. This is suitable for a normal server/VPS. Serverless platforms such as Vercel use ephemeral filesystem storage, so Vercel is currently suitable for testing the Web UI/API rather than final persistent storage.
 
