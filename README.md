@@ -51,6 +51,22 @@ print(Fernet.generate_key().decode())
 
 The user experience remains simple: **Connections → Connect → provider login → connected**.
 
+## Stored website mode
+
+Elephant Scrape is not tied to Google Drive for website hosting.
+
+The idea is **storage provider + Elephant Scrape renderer**:
+
+1. HTML/CSS/JavaScript files remain stored on the connected storage provider.
+2. Elephant Scrape retrieves the file when the browser requests the site.
+3. Elephant Scrape sends the correct web `Content-Type` instead of exposing the storage provider's generic file/download behavior.
+4. The browser therefore treats `index.html` as a web page and renders it.
+5. The same concept can be implemented for Google Drive, Dropbox, OneDrive, WebDAV and local storage.
+
+The user does not need to know or enter provider file IDs. Internal provider identifiers may be used by Elephant Scrape behind the scenes.
+
+Supported browser resource types in the Web MVP include HTML, CSS, JavaScript, JSON and SVG.
+
 ## Storage note
 
 The Web MVP currently uses the server filesystem as its storage provider. This is suitable for a normal server/VPS. Serverless platforms such as Vercel use ephemeral filesystem storage, so Vercel is currently suitable for testing the Web UI/API rather than final persistent storage.
