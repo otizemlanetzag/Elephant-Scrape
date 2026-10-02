@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, abort, jsonify, request, send_file, session
+from flask import Flask, Response, abort, jsonify, redirect, request, send_file, session
+from connections import OAUTH, load as load_connections, save as save_connections, start_oauth, finish_oauth
+import urllib.parse
 
 APP_NAME = "Elephant Scrape"
 BASE_DIR = Path(os.environ.get("ELEPHANT_DATA_DIR", Path.cwd() / ".elephant_data"))
@@ -18,6 +20,8 @@ MAX_UPLOAD = int(os.environ.get("ELEPHANT_MAX_UPLOAD", str(512 * 1024 * 1024)))
 app = Flask(__name__)
 app.secret_key = os.environ.get("ELEPHANT_SESSION_SECRET", secrets.token_hex(32))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD + 4 * 1024 * 1024
+CONNECTIONS = BASE_DIR / "connections" / "connections.json"
+CONNECTIONS.parent.mkdir(parents=True, exist_ok=True)
 
 def user_id() -> str:
     uid = session.get("uid")
@@ -95,6 +99,50 @@ def vercel_dispatch():
         if request.method == "DELETE":
             return api_delete(file_id)
     abort(404)
+
+@app.get("/api/connections")
+def api_connections():
+    return jsonify([{"provider": x["provider"], "name": x["name"], "mode": x["mode"]} for x in load_connections(CONNECTIONS)])
+
+@app.post("/api/connections/token")
+def api_token_connection():
+    data = request.get_json(silent=True) or {}
+    provider = str(data.get("provider", "")).lower()
+    token = str(data.get("token", "")).strip()
+    if provider not in {"google", "dropbox", "onedrive", "webdav"} or not token:
+        abort(400, "Provider and token are required.")
+    items = [x for x in load_connections(CONNECTIONS) if x.get("provider") != provider]
+    items.append({"provider": provider, "name": data.get("name") or provider.title(), "mode": "token", "token": token})
+    save_connections(CONNECTIONS, items)
+    return jsonify({"ok": True})
+
+@app.delete("/api/connections/<provider>")
+def api_disconnect(provider):
+    save_connections(CONNECTIONS, [x for x in load_connections(CONNECTIONS) if x.get("provider") != provider.lower()])
+    return jsonify({"ok": True})
+
+@app.get("/connect/<provider>")
+def api_connect(provider):
+    state, url = start_oauth(provider.lower(), request.url_root.rstrip("/") + "/oauth/callback")
+    session["oauth_state"] = state
+    session["oauth_provider"] = provider.lower()
+    return redirect(url)
+
+@app.get("/oauth/callback")
+def oauth_callback():
+    provider = session.pop("oauth_provider", None)
+    if request.args.get("state") != session.pop("oauth_state", None) or provider not in OAUTH:
+        abort(400, "Invalid OAuth connection.")
+    code = request.args.get("code")
+    if not code:
+        abort(400, "The provider did not return an authorization code.")
+    tokens = finish_oauth(provider, code, request.url_root.rstrip("/") + "/oauth/callback")
+    if not tokens.get("access_token"):
+        abort(400, "The provider returned no access token.")
+    items = [x for x in load_connections(CONNECTIONS) if x.get("provider") != provider]
+    items.append({"provider": provider, "name": OAUTH[provider]["name"], "mode": "oauth", "token": json.dumps(tokens)})
+    save_connections(CONNECTIONS, items)
+    return redirect("/?connected=" + urllib.parse.quote(OAUTH[provider]["name"]))
 
 @app.get("/api/me")
 def api_me():
@@ -182,13 +230,13 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 10p
 <body>
 <div class="app">
 <header class="top"><div class="logo">Elephant Scrape</div><div class="tag">privacy-first unified storage</div><div class="lock">🔒 encryption happens in your browser</div></header>
-<nav class="toolbar"><button class="primary" id="uploadBtn">Upload</button><button id="refreshBtn">Refresh</button><button id="downloadBtn">Download</button><button class="danger" id="deleteBtn">Delete</button><button id="vaultBtn">Vault</button></nav>
+<nav class="toolbar"><button class="primary" id="uploadBtn">Upload</button><button id="refreshBtn">Refresh</button><button id="downloadBtn">Download</button><button class="danger" id="deleteBtn">Delete</button><button id="vaultBtn">Vault</button><button id="connectionsBtn">Connections</button></nav>
 <main class="main"><aside class="side"><h3>Storage</h3><div class="provider"><strong>Web storage</strong><small>Encrypted objects on this Elephant Scrape server</small></div><p style="color:var(--muted);font-size:13px;line-height:1.5">Cloud providers can be added behind the same storage adapter without exposing your decrypted files to the server.</p></aside>
 <section class="panel"><div class="search"><input id="search" placeholder="Search your decrypted file names…"><button id="searchBtn">Search</button></div><table><thead><tr><th>Name</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody id="files"></tbody></table><div id="empty" class="empty">No files yet. Upload something to start your vault.</div></section></main>
 <footer class="status" id="status">Ready.</footer></div>
 <input id="fileInput" type="file" multiple class="hidden">
 <div class="modal" id="vaultModal"><div class="box"><h2>Vault passphrase</h2><p>Your passphrase stays in this browser tab. It is never sent to Elephant Scrape.</p><input id="passphrase" type="password" autocomplete="new-password" placeholder="Choose or enter your vault passphrase"><div class="warning">If you forget this passphrase, encrypted files cannot be recovered by the server.</div><div class="actions"><button id="vaultCancel">Cancel</button><button class="primary" id="vaultSave">Unlock vault</button></div></div></div>
-<script>
+<div class="modal" id="connectionsModal"><div class="box"><h2>Storage connections</h2><p>Connect normally — no provider IDs are needed. You can also paste a token.</p><div id="connectionList"></div><hr><h3>Token</h3><select id="tokenProvider" style="width:100%;padding:11px"><option value="google">Google Drive</option><option value="dropbox">Dropbox</option><option value="onedrive">OneDrive</option><option value="webdav">WebDAV</option></select><input id="tokenValue" type="password" placeholder="Paste token"><div class="actions"><button id="connectionsClose">Close</button><button class="primary" id="tokenConnect">Connect token</button></div></div></div><script>
 const state={key:null,salt:null,files:[]},$=id=>document.getElementById(id),enc=new TextEncoder(),dec=new TextDecoder();
 function b64(buf){return btoa(String.fromCharCode(...new Uint8Array(buf)))}function ub64(s){return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
 async function derive(pass,salt){const base=await crypto.subtle.importKey('raw',enc.encode(pass),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
@@ -207,7 +255,7 @@ async function del(){const tr=document.querySelector('#files tr.selected');if(!t
 $('files').onclick=e=>{const tr=e.target.closest('tr');if(!tr||e.target.tagName==='BUTTON')return;document.querySelectorAll('#files tr').forEach(x=>x.classList.remove('selected'));tr.classList.add('selected')};
 function format(n){let u=['B','KB','MB','GB','TB'],i=0,x=n;while(x>=1024&&i<4){x/=1024;i++}return x.toFixed(i?1:0)+' '+u[i]}function setStatus(x){$('status').textContent=x}
 $('uploadBtn').onclick=upload;$('refreshBtn').onclick=load;$('downloadBtn').onclick=()=>{const tr=document.querySelector('#files tr.selected');if(tr)tr.querySelector('button').click();else alert('Select a file first.')};$('deleteBtn').onclick=del;$('vaultBtn').onclick=()=>{$('vaultModal').classList.add('open')};$('searchBtn').onclick=render;$('search').oninput=render;
-load().catch(e=>setStatus('Could not load files: '+e.message));
+async function loadConnections(){const r=await fetch('/api/connections');const list=await r.json();const box=$('connectionList');box.innerHTML='';for(const [id,name] of [['google','Google Drive'],['dropbox','Dropbox'],['onedrive','OneDrive']]){const x=list.find(v=>v.provider===id);const row=document.createElement('div');row.style.cssText='display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #d8cbb9';row.innerHTML='<span><strong>'+name+'</strong><small style="display:block;color:var(--muted)">'+(x?'Connected via '+x.mode:'Not connected')+'</small></span>';const b=document.createElement('button');b.textContent=x?'Disconnect':'Connect';b.onclick=async()=>{if(x){await fetch('/api/connections/'+id,{method:'DELETE'});loadConnections()}else location.href='/connect/'+id};row.appendChild(b);box.appendChild(row)}}function openConnections(){loadConnections();$('connectionsModal').classList.add('open')}$('connectionsBtn').onclick=openConnections;$('connectionsClose').onclick=()=>$('connectionsModal').classList.remove('open');$('tokenConnect').onclick=async()=>{const token=$('tokenValue').value.trim();if(!token)return alert('Paste a token first.');const r=await fetch('/api/connections/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('tokenProvider').value,token})});if(!r.ok)return alert(await r.text());$('tokenValue').value='';loadConnections();setStatus('Connection saved.')};load().catch(e=>setStatus('Could not load files: '+e.message));
 </script></body></html>'''
 
 if __name__ == "__main__":
