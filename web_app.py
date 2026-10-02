@@ -202,7 +202,7 @@ def render_google_file(file_id):
             data = response.read()
     except Exception:
         abort(404, "Google Drive file content could not be downloaded.")
-    response = Response(data, mimetype="text/html; charset=utf-8")
+    response = Response(data, content_type="text/html; charset=utf-8")
     response.headers["Content-Disposition"] = "inline; filename*=UTF-8''" + urllib.parse.quote(meta.get("name", "index.html"))
     # Render HTML as an isolated document so downloaded pages cannot read Elephant Scrape cookies/app DOM.
     response.headers["Content-Security-Policy"] = "sandbox allow-scripts allow-forms allow-popups; default-src 'self' https: data: blob:; img-src 'self' https: data: blob:; style-src 'self' https: 'unsafe-inline'; script-src 'self' https: 'unsafe-inline' 'unsafe-eval'; connect-src https:; frame-src https:;"
