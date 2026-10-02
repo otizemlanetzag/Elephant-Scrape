@@ -91,6 +91,13 @@ def vercel_dispatch():
         return api_files()
     if path == "/api/files" and request.method == "POST":
         return api_upload()
+    if path == "/api/connections" and request.method == "GET":
+        return api_connections()
+    if path == "/api/connections/token" and request.method == "POST":
+        return api_token_connection()
+    match = re.fullmatch(r"/api/connections/([A-Za-z0-9_-]+)", path)
+    if match and request.method == "DELETE":
+        return api_disconnect(match.group(1))
     match = re.fullmatch(r"/api/files/([A-Za-z0-9_-]{16,100})", path)
     if match:
         file_id = match.group(1)
@@ -98,6 +105,11 @@ def vercel_dispatch():
             return api_download(file_id)
         if request.method == "DELETE":
             return api_delete(file_id)
+    match = re.fullmatch(r"/connect/(google|dropbox|onedrive)", path)
+    if match and request.method == "GET":
+        return api_connect(match.group(1))
+    if path == "/oauth/callback" and request.method == "GET":
+        return oauth_callback()
     abort(404)
 
 @app.get("/api/connections")
