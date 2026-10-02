@@ -75,6 +75,27 @@ def security_headers(response: Response):
 def index():
     return Response(INDEX_HTML, mimetype="text/html")
 
+@app.route("/api/index", methods=["GET", "POST", "DELETE"])
+def vercel_dispatch():
+    """Dispatch Vercel rewrites back to the Flask routes."""
+    path = request.args.get("path", "/")
+    if path == "/":
+        return index()
+    if path == "/api/me" and request.method == "GET":
+        return api_me()
+    if path == "/api/files" and request.method == "GET":
+        return api_files()
+    if path == "/api/files" and request.method == "POST":
+        return api_upload()
+    match = re.fullmatch(r"/api/files/([A-Za-z0-9_-]{16,100})", path)
+    if match:
+        file_id = match.group(1)
+        if request.method == "GET":
+            return api_download(file_id)
+        if request.method == "DELETE":
+            return api_delete(file_id)
+    abort(404)
+
 @app.get("/api/me")
 def api_me():
     items = load_manifest()
