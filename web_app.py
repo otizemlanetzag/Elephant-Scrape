@@ -104,6 +104,7 @@ def vercel_dispatch():
     if path == "/api/websites" and request.method == "GET": return api_websites()
     if path == "/api/websites" and request.method == "POST": return api_publish_website()
     match = re.fullmatch(r"/api/websites/([A-Za-z0-9-]+)", path)
+    if match and request.method == "PATCH": return api_update_website(match.group(1))
     if match and request.method == "DELETE": return api_unpublish_website(match.group(1))
     if path == "/api/connections/token" and request.method == "POST":
         return api_token_connection()
@@ -198,8 +199,16 @@ def api_publish_website():
         domain=name+"."+base
     if not re.fullmatch(r"[a-z0-9.-]+",domain): abort(400,"Invalid domain.")
     items=[x for x in load_websites() if x.get("domain")!=domain and x.get("name")!=name]
-    site={"name":name,"folder":folder,"domain":domain,"provider":str(data.get("provider","local")).lower(),"entrypoint":"index.html","created":int(time.time())}
+    site={"name":name,"folder":folder,"domain":domain,"provider":str(data.get("provider","local")).lower(),"entrypoint":"index.html","created":int(time.time()),"published":True,"hide_from_search":bool(data.get("hide_from_search",False))}
     items.append(site); save_websites(items); return jsonify(site),201
+
+def api_update_website(name):
+    name=valid_site_name(name); data=request.get_json(silent=True) or {}
+    items=load_websites(); site=next((x for x in items if x.get("name")==name),None)
+    if not site: abort(404)
+    if "hide_from_search" in data: site["hide_from_search"]=bool(data["hide_from_search"])
+    if "published" in data: site["published"]=bool(data["published"])
+    save_websites(items); return jsonify(site)
 
 def api_unpublish_website(name):
     name=valid_site_name(name); items=load_websites(); remaining=[x for x in items if x.get("name")!=name]
@@ -216,12 +225,18 @@ def safe_site_path(value: str) -> str:
 
 def serve_published_site():
     site=website_for_host(request.host)
-    if not site: abort(404,"Website domain is not connected to Elephant Scrape.")
+    if not site or not site.get("published", True): abort(404,"Website is not published.")
+    if request.path == "/robots.txt":
+        body = "User-agent: *\\nDisallow: /\\n" if site.get("hide_from_search", False) else "User-agent: *\\nAllow: /\\n"
+        return Response(body, content_type="text/plain; charset=utf-8")
     root=(user_dir()/site["folder"]).resolve(); target=(root/safe_site_path(request.path)).resolve()
     if root not in target.parents and target!=root: abort(404)
     if not target.is_file() and request.path.endswith("/"): target=(root/"index.html").resolve()
     if not target.is_file(): abort(404)
-    return browser_site_response(target.read_bytes(),target.name)
+    response=browser_site_response(target.read_bytes(),target.name)
+    if site.get("hide_from_search", False) and target.suffix.lower() in {".html",".htm"}:
+        response.headers["X-Robots-Tag"]="noindex, nofollow, noarchive"
+    return response
 
 def html_content_type(name: str) -> str | None:
     lower = name.lower()
