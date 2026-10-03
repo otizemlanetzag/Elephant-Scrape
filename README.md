@@ -88,3 +88,30 @@ This is an MVP privacy model, not a claim of a complete production key-recovery 
 ## License
 
 See `LICENSE.md`.
+
+## WEBSITE publishing and domains
+
+Any folder marked **WEBSITE** can be published as its own website. Elephant Scrape keeps the website files in the selected storage provider and serves them as web resources.
+
+For every published WEBSITE folder, Elephant Scrape stores a mapping containing the website name, storage folder, public domain or subdomain, and `index.html` as the default entrypoint.
+
+### Domain choices
+
+You can use a subdomain under the Elephant Scrape domain, your own custom domain, a DuckDNS hostname, or a No-IP hostname.
+
+DuckDNS and No-IP are DNS/DDNS services, not file storage. Their hostname should point to the Elephant Scrape web server. Elephant Scrape then receives the hostname in the HTTP `Host` header, finds the matching WEBSITE folder, and serves `/index.html` and its relative resources.
+
+The UI includes guidance for DuckDNS and No-IP so the user can create/manage a hostname without entering provider file IDs.
+
+### Website routing
+
+A published site works like this:
+
+- `https://site.example/` → `index.html`
+- `https://site.example/style.css` → `style.css`
+- `https://site.example/app.js` → `app.js`
+- `https://site.example/images/logo.svg` → `images/logo.svg`
+
+Path traversal outside the published WEBSITE folder is rejected.
+
+> Vercel note: wildcard/custom-domain DNS and persistent website mappings require persistent domain configuration. The current server-filesystem MVP is suitable for testing, but production publishing should use persistent storage for the mappings and website files.
