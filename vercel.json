@@ -1,9 +1,25 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    { "source": "/", "destination": "/api/index?path=/" },
-    { "source": "/api/:path*", "destination": "/api/index?path=/api/:path*" },
-    { "source": "/connect/:provider", "destination": "/api/index?path=/connect/:provider" },
-    { "source": "/oauth/callback", "destination": "/api/index?path=/oauth/callback" }
+    {
+      "source": "/",
+      "destination": "/api/index?path=/"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index?path=/api/:path*"
+    },
+    {
+      "source": "/connect/:provider",
+      "destination": "/api/index?path=/connect/:provider"
+    },
+    {
+      "source": "/oauth/callback",
+      "destination": "/api/index?path=/oauth/callback"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/api/index?path=/:path*"
+    }
   ]
 }
