@@ -10,8 +10,8 @@ from typing import Any
 
 from flask import Flask, Response, abort, jsonify, redirect, request, send_file, session
 from connections import OAUTH, load as load_connections, save as save_connections, start_oauth, finish_oauth
-from connections import OAUTH, load as load_connections, save as save_connections, start_oauth, finish_oauth
 import urllib.parse
+import urllib.request
 
 APP_NAME = "Elephant Scrape"
 BASE_DIR = Path(os.environ.get("ELEPHANT_DATA_DIR", Path.cwd() / ".elephant_data"))
@@ -23,6 +23,7 @@ app.secret_key = os.environ.get("ELEPHANT_SESSION_SECRET", secrets.token_hex(32)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD + 4 * 1024 * 1024
 CONNECTIONS = BASE_DIR / "connections" / "connections.json"
 CONNECTIONS.parent.mkdir(parents=True, exist_ok=True)
+WEBSITES = BASE_DIR / "websites.json"
 
 def user_id() -> str:
     uid = session.get("uid")
@@ -100,6 +101,10 @@ def vercel_dispatch():
         return api_upload()
     if path == "/api/connections" and request.method == "GET":
         return api_connections()
+    if path == "/api/websites" and request.method == "GET": return api_websites()
+    if path == "/api/websites" and request.method == "POST": return api_publish_website()
+    match = re.fullmatch(r"/api/websites/([A-Za-z0-9-]+)", path)
+    if match and request.method == "DELETE": return api_unpublish_website(match.group(1))
     if path == "/api/connections/token" and request.method == "POST":
         return api_token_connection()
     match = re.fullmatch(r"/api/connections/([A-Za-z0-9_-]+)", path)
@@ -115,8 +120,8 @@ def vercel_dispatch():
     match = re.fullmatch(r"/connect/(google|dropbox|onedrive)", path)
     if match and request.method == "GET":
         return api_connect(match.group(1))
-    if path == "/oauth/callback" and request.method == "GET":
-        return oauth_callback()
+    if path == "/oauth/callback" and request.method == "GET": return oauth_callback()
+    if request.method == "GET" and not path.startswith("/api/") and not path.startswith("/connect/") and not path.startswith("/oauth/"): return serve_published_site()
     abort(404)
 
 @app.get("/api/connections")
@@ -162,6 +167,61 @@ def oauth_callback():
     items.append({"provider": provider, "name": OAUTH[provider]["name"], "mode": "oauth", "token": json.dumps(tokens)})
     save_connections(CONNECTIONS, items)
     return redirect("/?connected=" + urllib.parse.quote(OAUTH[provider]["name"]))
+
+def load_websites() -> list[dict[str, Any]]:
+    if not WEBSITES.exists(): return []
+    try:
+        data = json.loads(WEBSITES.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError): return []
+
+def save_websites(items: list[dict[str, Any]]) -> None:
+    tmp = WEBSITES.with_suffix(".tmp"); tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"); os.replace(tmp, WEBSITES)
+
+def valid_site_name(value: str) -> str:
+    value = (value or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", value): abort(400, "Invalid website name.")
+    return value
+
+def valid_site_folder(value: str) -> str:
+    value = (value or "").strip().strip("/")
+    if not value or ".." in Path(value).parts: abort(400, "Invalid website folder.")
+    return value
+
+def api_websites(): return jsonify(load_websites())
+
+def api_publish_website():
+    data=request.get_json(silent=True) or {}; folder=valid_site_folder(str(data.get("folder",""))); name=valid_site_name(str(data.get("name",folder.split("/")[-1])))
+    domain=str(data.get("domain","")).strip().lower(); base=os.environ.get("ELEPHANT_SITE_BASE_DOMAIN","").strip().lower()
+    if not domain:
+        if not base: abort(400,"Set ELEPHANT_SITE_BASE_DOMAIN or enter a custom domain.")
+        domain=name+"."+base
+    if not re.fullmatch(r"[a-z0-9.-]+",domain): abort(400,"Invalid domain.")
+    items=[x for x in load_websites() if x.get("domain")!=domain and x.get("name")!=name]
+    site={"name":name,"folder":folder,"domain":domain,"provider":str(data.get("provider","local")).lower(),"entrypoint":"index.html","created":int(time.time())}
+    items.append(site); save_websites(items); return jsonify(site),201
+
+def api_unpublish_website(name):
+    name=valid_site_name(name); items=load_websites(); remaining=[x for x in items if x.get("name")!=name]
+    if len(remaining)==len(items): abort(404)
+    save_websites(remaining); return jsonify({"ok":True})
+
+def website_for_host(host: str):
+    host=(host or "").split(":",1)[0].lower().rstrip("."); return next((x for x in load_websites() if x.get("domain","").lower()==host),None)
+
+def safe_site_path(value: str) -> str:
+    parts=[p for p in urllib.parse.unquote(value or "").lstrip("/").split("/") if p]
+    if any(p in {".",".."} for p in parts): abort(404)
+    return "/".join(parts) or "index.html"
+
+def serve_published_site():
+    site=website_for_host(request.host)
+    if not site: abort(404,"Website domain is not connected to Elephant Scrape.")
+    root=(user_dir()/site["folder"]).resolve(); target=(root/safe_site_path(request.path)).resolve()
+    if root not in target.parents and target!=root: abort(404)
+    if not target.is_file() and request.path.endswith("/"): target=(root/"index.html").resolve()
+    if not target.is_file(): abort(404)
+    return browser_site_response(target.read_bytes(),target.name)
 
 def html_content_type(name: str) -> str | None:
     lower = name.lower()
@@ -329,13 +389,13 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 10p
 <body>
 <div class="app">
 <header class="top"><div class="logo">Elephant Scrape</div><div class="tag">privacy-first unified storage</div><div class="lock">🔒 encryption happens in your browser</div></header>
-<nav class="toolbar"><button class="primary" id="uploadBtn">Upload</button><button id="refreshBtn">Refresh</button><button id="downloadBtn">Download</button><button class="danger" id="deleteBtn">Delete</button><button id="vaultBtn">Vault</button><button id="connectionsBtn">Connections</button></nav>
+<nav class="toolbar"><button class="primary" id="uploadBtn">Upload</button><button id="refreshBtn">Refresh</button><button id="downloadBtn">Download</button><button class="danger" id="deleteBtn">Delete</button><button id="vaultBtn">Vault</button><button id="connectionsBtn">Connections</button><button id="websiteBtn">Publish Website</button></nav>
 <main class="main"><aside class="side"><h3>Storage</h3><div class="provider"><strong>Web storage</strong><small>Encrypted objects on this Elephant Scrape server</small></div><p style="color:var(--muted);font-size:13px;line-height:1.5">Cloud providers can be added behind the same storage adapter without exposing your decrypted files to the server.</p></aside>
 <section class="panel"><div class="search"><input id="search" placeholder="Search your decrypted file names…"><button id="searchBtn">Search</button></div><table><thead><tr><th>Name</th><th>Size</th><th>Added</th><th></th></tr></thead><tbody id="files"></tbody></table><div id="empty" class="empty">No files yet. Upload something to start your vault.</div></section></main>
 <footer class="status" id="status">Ready.</footer></div>
 <input id="fileInput" type="file" multiple class="hidden">
 <div class="modal" id="vaultModal"><div class="box"><h2>Vault passphrase</h2><p>Your passphrase stays in this browser tab. It is never sent to Elephant Scrape.</p><input id="passphrase" type="password" autocomplete="new-password" placeholder="Choose or enter your vault passphrase"><div class="warning">If you forget this passphrase, encrypted files cannot be recovered by the server.</div><div class="actions"><button id="vaultCancel">Cancel</button><button class="primary" id="vaultSave">Unlock vault</button></div></div></div>
-<div class="modal" id="connectionsModal"><div class="box"><h2>Storage connections</h2><p>Connect normally — no provider IDs are needed. You can also paste a token.</p><div id="connectionList"></div><hr><h3>Token</h3><select id="tokenProvider" style="width:100%;padding:11px"><option value="google">Google Drive</option><option value="dropbox">Dropbox</option><option value="onedrive">OneDrive</option><option value="webdav">WebDAV</option></select><input id="tokenValue" type="password" placeholder="Paste token"><div class="actions"><button id="connectionsClose">Close</button><button class="primary" id="tokenConnect">Connect token</button></div></div></div><script>
+<div class="modal" id="websiteModal"><div class="box"><h2>Publish a WEBSITE folder</h2><p>Each WEBSITE folder gets its own domain or subdomain.</p><label>Folder</label><input id="websiteFolder" placeholder="my-site"><label>Website name</label><input id="websiteName" placeholder="my-site"><label>Domain (optional)</label><input id="websiteDomain" placeholder="my-site.example.com"><div class="warning">DuckDNS and No-IP can provide DNS/DDNS hostnames. The files remain in Elephant Scrape storage.</div><div class="actions"><button id="websiteCancel">Cancel</button><button class="primary" id="websitePublish">Publish Website</button></div><div id="websiteList" style="margin-top:18px"></div></div></div><div class="modal" id="connectionsModal"><div class="box"><h2>Storage connections</h2><p>Connect normally — no provider IDs are needed. You can also paste a token.</p><div id="connectionList"></div><hr><h3>Token</h3><select id="tokenProvider" style="width:100%;padding:11px"><option value="google">Google Drive</option><option value="dropbox">Dropbox</option><option value="onedrive">OneDrive</option><option value="webdav">WebDAV</option></select><input id="tokenValue" type="password" placeholder="Paste token"><div class="actions"><button id="connectionsClose">Close</button><button class="primary" id="tokenConnect">Connect token</button></div></div></div><script>
 const state={key:null,salt:null,files:[]},$=id=>document.getElementById(id),enc=new TextEncoder(),dec=new TextDecoder();
 function b64(buf){return btoa(String.fromCharCode(...new Uint8Array(buf)))}function ub64(s){return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
 async function derive(pass,salt){const base=await crypto.subtle.importKey('raw',enc.encode(pass),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
@@ -353,7 +413,7 @@ async function download(record){if(!state.key){$('vaultModal').classList.add('op
 async function del(){const tr=document.querySelector('#files tr.selected');if(!tr){alert('Select a file first.');return}const id=tr.querySelector('button').dataset.id;if(!confirm('Delete this encrypted object permanently?'))return;const r=await fetch('/api/files/'+id,{method:'DELETE'});if(!r.ok)alert('Delete failed');await load()}
 $('files').onclick=e=>{const tr=e.target.closest('tr');if(!tr||e.target.tagName==='BUTTON')return;document.querySelectorAll('#files tr').forEach(x=>x.classList.remove('selected'));tr.classList.add('selected')};
 function format(n){let u=['B','KB','MB','GB','TB'],i=0,x=n;while(x>=1024&&i<4){x/=1024;i++}return x.toFixed(i?1:0)+' '+u[i]}function setStatus(x){$('status').textContent=x}
-$('uploadBtn').onclick=upload;$('refreshBtn').onclick=load;$('downloadBtn').onclick=()=>{const tr=document.querySelector('#files tr.selected');if(tr)tr.querySelector('button').click();else alert('Select a file first.')};$('deleteBtn').onclick=del;$('vaultBtn').onclick=()=>{$('vaultModal').classList.add('open')};$('searchBtn').onclick=render;$('search').oninput=render;
+$('websiteBtn').onclick=()=>{$('websiteModal').classList.add('open');loadWebsites()};$('websiteCancel').onclick=()=>$('websiteModal').classList.remove('open');async function loadWebsites(){const r=await fetch('/api/websites');if(!r.ok)return;const list=await r.json();$('websiteList').innerHTML=list.length?'<h3>Published websites</h3>':'';for(const x of list){const row=document.createElement('div');row.style.cssText='padding:10px 0;border-bottom:1px solid #d8cbb9';row.innerHTML='<strong></strong><small style="display:block;color:var(--muted)"></small>';row.children[0].textContent=x.domain;row.children[1].textContent='WEBSITE: '+x.folder;const b=document.createElement('button');b.textContent='Unpublish';b.onclick=async()=>{await fetch('/api/websites/'+encodeURIComponent(x.name),{method:'DELETE'});loadWebsites()};row.appendChild(b);$('websiteList').appendChild(row)}}$('websitePublish').onclick=async()=>{const folder=$('websiteFolder').value.trim(),name=$('websiteName').value.trim()||folder.split('/').pop(),domain=$('websiteDomain').value.trim();if(!folder)return alert('Enter the WEBSITE folder.');const r=await fetch('/api/websites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder,name,domain})});if(!r.ok)return alert(await r.text());const x=await r.json();$('websiteDomain').value='';loadWebsites();setStatus('Website published at '+x.domain)};$('uploadBtn').onclick=upload;$('refreshBtn').onclick=load;$('downloadBtn').onclick=()=>{const tr=document.querySelector('#files tr.selected');if(tr)tr.querySelector('button').click();else alert('Select a file first.')};$('deleteBtn').onclick=del;$('vaultBtn').onclick=()=>{$('vaultModal').classList.add('open')};$('searchBtn').onclick=render;$('search').oninput=render;
 async function loadConnections(){const r=await fetch('/api/connections');const list=await r.json();const box=$('connectionList');box.innerHTML='';for(const [id,name] of [['google','Google Drive'],['dropbox','Dropbox'],['onedrive','OneDrive']]){const x=list.find(v=>v.provider===id);const row=document.createElement('div');row.style.cssText='display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #d8cbb9';row.innerHTML='<span><strong>'+name+'</strong><small style="display:block;color:var(--muted)">'+(x?'Connected via '+x.mode:'Not connected')+'</small></span>';const b=document.createElement('button');b.textContent=x?'Disconnect':'Connect';b.onclick=async()=>{if(x){await fetch('/api/connections/'+id,{method:'DELETE'});loadConnections()}else location.href='/connect/'+id};row.appendChild(b);box.appendChild(row)}}function openConnections(){loadConnections();$('connectionsModal').classList.add('open')}$('connectionsBtn').onclick=openConnections;$('connectionsClose').onclick=()=>$('connectionsModal').classList.remove('open');$('tokenConnect').onclick=async()=>{const token=$('tokenValue').value.trim();if(!token)return alert('Paste a token first.');const r=await fetch('/api/connections/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('tokenProvider').value,token})});if(!r.ok)return alert(await r.text());$('tokenValue').value='';loadConnections();setStatus('Connection saved.')};load().catch(e=>setStatus('Could not load files: '+e.message));
 </script></body></html>'''
 
