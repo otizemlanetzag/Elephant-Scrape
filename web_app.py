@@ -24,6 +24,9 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD + 4 * 1024 * 1024
 CONNECTIONS = BASE_DIR / "connections" / "connections.json"
 CONNECTIONS.parent.mkdir(parents=True, exist_ok=True)
 WEBSITES = BASE_DIR / "websites.json"
+SITE_CACHE = BASE_DIR / "site_cache"
+SITE_CACHE_TTL = 600
+SITE_CACHE.mkdir(parents=True, exist_ok=True)
 
 def user_id() -> str:
     uid = session.get("uid")
@@ -234,6 +237,39 @@ def safe_site_path(value: str) -> str:
     if any(p in {".",".."} for p in parts): abort(404)
     return "/".join(parts) or "index.html"
 
+def site_cache_key(site, relative):
+    raw = (str(site.get("name","")) + "\0" + relative).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+def read_site_cache(site, relative):
+    key = site_cache_key(site, relative)
+    meta = SITE_CACHE / (key + ".json")
+    blob = SITE_CACHE / (key + ".bin")
+    try:
+        info = json.loads(meta.read_text(encoding="utf-8"))
+        if time.time() - float(info["cached_at"]) <= SITE_CACHE_TTL and blob.is_file():
+            return blob.read_bytes(), info.get("name", relative)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        meta.unlink(missing_ok=True); blob.unlink(missing_ok=True)
+    except OSError: pass
+    return None
+
+def write_site_cache(site, relative, data, name):
+    key = site_cache_key(site, relative)
+    (SITE_CACHE / (key + ".bin")).write_bytes(data)
+    (SITE_CACHE / (key + ".json")).write_text(json.dumps({"cached_at": time.time(), "name": name}), encoding="utf-8")
+
+def cleanup_site_cache():
+    cutoff = time.time() - SITE_CACHE_TTL
+    for meta in SITE_CACHE.glob("*.json"):
+        try:
+            info = json.loads(meta.read_text(encoding="utf-8"))
+            if float(info.get("cached_at", 0)) < cutoff:
+                key = meta.stem; meta.unlink(missing_ok=True); (SITE_CACHE / (key + ".bin")).unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError): pass
+
 def serve_published_site():
     site=website_for_host(request.host)
     if not site or not site.get("published", True): abort(404,"Website is not published.")
@@ -244,7 +280,15 @@ def serve_published_site():
     if root not in target.parents and target!=root: abort(404)
     if not target.is_file() and request.path.endswith("/"): target=(root/"index.html").resolve()
     if not target.is_file(): abort(404)
-    response=browser_site_response(target.read_bytes(),target.name)
+    cleanup_site_cache()
+    cached = read_site_cache(site, safe_site_path(request.path))
+    if cached:
+        data, cached_name = cached
+        response = browser_site_response(data, cached_name)
+    else:
+        data = target.read_bytes()
+        write_site_cache(site, safe_site_path(request.path), data, target.name)
+        response = browser_site_response(data, target.name)
     if site.get("hide_from_search", False) and target.suffix.lower() in {".html",".htm"}:
         response.headers["X-Robots-Tag"]="noindex, nofollow, noarchive"
     return response
