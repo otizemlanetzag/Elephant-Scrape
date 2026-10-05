@@ -523,6 +523,30 @@ class StorageRouter:
         provider.put(object_name, blob)
         return Placement(provider, object_name, len(blob))
 
+    def get(self, object_name: str) -> bytes:
+        errors = []
+        for provider in self.providers:
+            try:
+                if provider.exists(object_name):
+                    return provider.get(object_name)
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("Could not read the object from any connected storage provider.")
+        raise FileNotFoundError(object_name)
+
+    def delete(self, object_name: str) -> None:
+        found = False
+        for provider in self.providers:
+            try:
+                if provider.exists(object_name):
+                    provider.delete(object_name)
+                    found = True
+            except Exception:
+                continue
+        if not found:
+            raise FileNotFoundError(object_name)
+
 
 # -------------------------
 # Download security policy
