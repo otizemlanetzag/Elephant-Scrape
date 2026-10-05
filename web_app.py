@@ -30,6 +30,46 @@ SITE_CACHE = BASE_DIR / "site_cache"
 SITE_CACHE_TTL = 600
 SITE_CACHE.mkdir(parents=True, exist_ok=True)
 
+# Vercel Blob is the durable backend in production. The local filesystem remains
+# available for local development when no Blob token is configured.
+BLOB_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN") or os.environ.get("VERCEL_BLOB_READ_WRITE_TOKEN")
+BLOB_BASE = "https://blob.vercel-storage.com"
+
+def blob_enabled() -> bool:
+    return bool(BLOB_TOKEN)
+
+def blob_object_path(*parts: str) -> str:
+    cleaned = []
+    for part in parts:
+        part = str(part).replace("\\", "/").strip("/")
+        if part:
+            cleaned.append("/".join(x for x in part.split("/") if x not in ("", ".", "..")))
+    return "/".join(cleaned)
+
+def blob_request(path: str, method: str = "GET", data: bytes | None = None, content_type: str = "application/octet-stream"):
+    if not BLOB_TOKEN:
+        raise RuntimeError("Durable storage is not configured.")
+    url = BLOB_BASE + "/" + blob_object_path(path)
+    headers = {
+        "Authorization": "Bearer " + BLOB_TOKEN,
+        "x-api-version": "7",
+        "x-content-type": content_type,
+    }
+    if method == "PUT":
+        headers.update({"x-add-random-suffix": "0", "x-allow-overwrite": "1"})
+    req = urllib.request.Request(url, method=method, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+def durable_path(kind: str, owner: str, name: str) -> str:
+    return blob_object_path("elephant-scrape", owner, kind, name)
+
+
 
 # --- Security hardening -------------------------------------------------
 SECURITY_MAX_PATH = 240
@@ -132,19 +172,28 @@ def manifest_path() -> Path:
     return user_dir() / "manifest.json"
 
 def load_manifest() -> list[dict[str, Any]]:
-    p = manifest_path()
-    if not p.exists():
-        return []
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        if blob_enabled():
+            raw = blob_request(durable_path("manifests", user_id(), "manifest.json"))
+            if not raw:
+                return []
+            data = json.loads(raw.decode("utf-8"))
+        else:
+            p = manifest_path()
+            if not p.exists(): return []
+            data = json.loads(p.read_text(encoding="utf-8"))
         return data if isinstance(data, list) else []
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError, urllib.error.URLError):
         return []
 
 def save_manifest(items: list[dict[str, Any]]) -> None:
+    payload = json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")
+    if blob_enabled():
+        blob_request(durable_path("manifests", user_id(), "manifest.json"), "PUT", payload, "application/json")
+        return
     p = manifest_path()
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(payload.decode("utf-8"), encoding="utf-8")
     os.replace(tmp, p)
 
 def blob_path(file_id: str) -> Path:
@@ -263,28 +312,47 @@ def oauth_callback():
 
 def load_settings() -> dict[str, Any]:
     defaults = {"anti_analytics": True}
-    if not settings_path().exists():
-        return defaults.copy()
     try:
-        data = json.loads(settings_path().read_text(encoding="utf-8"))
+        if blob_enabled():
+            raw = blob_request(durable_path("settings", user_id(), "settings.json"))
+            if not raw: return defaults.copy()
+            data = json.loads(raw.decode("utf-8"))
+        else:
+            if not settings_path().exists(): return defaults.copy()
+            data = json.loads(settings_path().read_text(encoding="utf-8"))
         return {**defaults, **(data if isinstance(data, dict) else {})}
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, urllib.error.URLError):
         return defaults.copy()
 
 def save_settings(data: dict[str, Any]) -> None:
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    if blob_enabled():
+        blob_request(durable_path("settings", user_id(), "settings.json"), "PUT", payload, "application/json")
+        return
     tmp = settings_path().with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_bytes(payload)
     os.replace(tmp, settings_path())
 
 def load_websites() -> list[dict[str, Any]]:
-    if not WEBSITES.exists(): return []
     try:
-        data = json.loads(WEBSITES.read_text(encoding="utf-8"))
+        if blob_enabled():
+            raw = blob_request(durable_path("websites", user_id(), "websites.json"))
+            if not raw: return []
+            data = json.loads(raw.decode("utf-8"))
+        else:
+            if not WEBSITES.exists(): return []
+            data = json.loads(WEBSITES.read_text(encoding="utf-8"))
         return data if isinstance(data, list) else []
-    except (OSError, ValueError): return []
+    except (OSError, ValueError, TypeError, urllib.error.URLError): return []
 
 def save_websites(items: list[dict[str, Any]]) -> None:
-    tmp = WEBSITES.with_suffix(".tmp"); tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"); os.replace(tmp, WEBSITES)
+    payload = json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")
+    if blob_enabled():
+        blob_request(durable_path("websites", user_id(), "websites.json"), "PUT", payload, "application/json")
+        return
+    tmp = WEBSITES.with_suffix(".tmp")
+    tmp.write_bytes(payload)
+    os.replace(tmp, WEBSITES)
 
 def valid_site_name(value: str) -> str:
     value = (value or "").strip().lower()
@@ -551,19 +619,23 @@ def api_upload():
         abort(400, "Only client-encrypted objects are accepted")
 
     file_id = secrets.token_urlsafe(24)
-    target = blob_path(file_id)
+    chunks = []
     size = 0
-    with target.open("wb") as out:
-        while True:
-            chunk = upload.stream.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > MAX_UPLOAD:
-                out.close()
-                target.unlink(missing_ok=True)
-                abort(413, "File is too large")
-            out.write(chunk)
+    while True:
+        chunk = upload.stream.read(1024 * 1024)
+        if not chunk: break
+        size += len(chunk)
+        if size > MAX_UPLOAD: abort(413, "File is too large")
+        chunks.append(chunk)
+    payload = b"".join(chunks)
+    if blob_enabled():
+        try:
+            blob_request(durable_path("files", user_id(), file_id + ".blob"), "PUT", payload)
+        except Exception:
+            abort(503, "Durable storage upload failed.")
+    else:
+        target = blob_path(file_id)
+        target.write_bytes(payload)
 
     record = {"id": file_id, "size": size, "created": int(time.time()), "metadata": metadata}
     items = load_manifest()
@@ -573,9 +645,15 @@ def api_upload():
 
 @app.get("/api/files/<file_id>")
 def api_download(file_id: str):
-    path = blob_path(file_id)
-    if not path.exists():
+    safe_id(file_id)
+    if not any(x.get("id") == file_id for x in load_manifest()):
         abort(404)
+    if blob_enabled():
+        data = blob_request(durable_path("files", user_id(), file_id + ".blob"))
+        if data is None: abort(404)
+        return Response(data, mimetype="application/octet-stream")
+    path = blob_path(file_id)
+    if not path.exists(): abort(404)
     return send_file(path, mimetype="application/octet-stream", as_attachment=False)
 
 @app.delete("/api/files/<file_id>")
@@ -585,7 +663,11 @@ def api_delete(file_id: str):
     remaining = [x for x in items if x.get("id") != file_id]
     if len(remaining) == len(items):
         abort(404)
-    blob_path(file_id).unlink(missing_ok=True)
+    if blob_enabled():
+        try: blob_request(durable_path("files", user_id(), file_id + ".blob"), "DELETE")
+        except Exception: abort(503, "Durable storage delete failed.")
+    else:
+        blob_path(file_id).unlink(missing_ok=True)
     save_manifest(remaining)
     return jsonify({"ok": True})
 
