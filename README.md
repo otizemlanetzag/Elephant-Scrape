@@ -93,6 +93,19 @@ See `LICENSE.md`.
 
 Any folder marked **WEBSITE** can be published as its own website. Elephant Scrape keeps the website files in the selected storage provider and serves them as web resources.
 
+### site.deydn.io addresses
+
+Elephant Scrape supports dedicated addresses in the form:
+
+`https://{user-chosen-name}.site.deydn.io`
+
+The user enters only the part before `.site.deydn.io`. Elephant Scrape builds and stores the complete hostname automatically. For example, entering `my-site` creates `https://my-site.site.deydn.io`.
+
+The deployment must have wildcard DNS/routing for `*.site.deydn.io` pointing to the Elephant Scrape deployment.
+
+
+Any folder marked **WEBSITE** can be published as its own website. Elephant Scrape keeps the website files in the selected storage provider and serves them as web resources.
+
 For every published WEBSITE folder, Elephant Scrape stores a mapping containing the website name, storage folder, public domain or subdomain, and `index.html` as the default entrypoint.
 
 ### Domain choices
