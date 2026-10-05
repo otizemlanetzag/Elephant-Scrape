@@ -1028,6 +1028,8 @@ class ElephantApp:
         if self.legacy_provider_config.exists():
             configs = json.loads(self.legacy_provider_config.read_text(encoding="utf-8"))
             self._write_provider_config(configs)
+            try: self.legacy_provider_config.unlink()
+            except OSError: pass
             return configs
         return []
 
