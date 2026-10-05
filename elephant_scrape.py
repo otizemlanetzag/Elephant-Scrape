@@ -703,7 +703,8 @@ class ElephantApp:
         self.legacy_provider_config = self.base / "providers.json"
         self._load_connected_providers()
 
-        self.key_path = self.base / "vault.key"
+        self.key_path = self.base / ("vault.secure" if os.name == "nt" else "vault.key")
+        self.legacy_key_path = self.base / "vault.key"
         self.vault = self._load_vault()
         self.index = VaultIndex(self.index_path)
 
@@ -978,14 +979,23 @@ class ElephantApp:
 
     def _load_vault(self):
         if self.key_path.exists():
-            key = base64.b64decode(self.key_path.read_text(encoding="ascii"))
+            raw = self.key_path.read_bytes()
+            key = _dpapi_unprotect(raw) if os.name == "nt" else base64.b64decode(raw)
             return Vault(key)
+        if self.legacy_key_path.exists():
+            legacy = base64.b64decode(self.legacy_key_path.read_text(encoding="ascii"))
+            if os.name == "nt":
+                self.key_path.write_bytes(_dpapi_protect(legacy))
+                try: self.legacy_key_path.unlink()
+                except OSError: pass
+            else:
+                self.key_path.write_bytes(base64.b64encode(legacy))
+            return Vault(legacy)
         vault = Vault.new()
-        self.key_path.write_text(base64.b64encode(vault.key).decode("ascii"), encoding="ascii")
-        try:
-            os.chmod(self.key_path, 0o600)
-        except OSError:
-            pass
+        protected = _dpapi_protect(vault.key) if os.name == "nt" else base64.b64encode(vault.key)
+        self.key_path.write_bytes(protected)
+        try: os.chmod(self.key_path, 0o600)
+        except OSError: pass
         return vault
 
     def _status_text(self):
@@ -1018,8 +1028,6 @@ class ElephantApp:
         if self.legacy_provider_config.exists():
             configs = json.loads(self.legacy_provider_config.read_text(encoding="utf-8"))
             self._write_provider_config(configs)
-            try: self.legacy_provider_config.replace(self.legacy_provider_config.with_suffix(".legacy"))
-            except OSError: pass
             return configs
         return []
 
