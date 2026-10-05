@@ -30,6 +30,10 @@ Then open `http://127.0.0.1:5000`.
 
 Set `ELEPHANT_SESSION_SECRET` to a long random secret for a stable deployment.
 
+### Persistent Vercel storage
+
+When deployed on Vercel, connect a Vercel Blob store to the project. Set `BLOB_READ_WRITE_TOKEN` (Vercel normally provides this when the Blob store is connected). Elephant Scrape then stores encrypted file blobs, per-user manifests/settings, website registry data, and encrypted OAuth connection records in durable Blob storage instead of the ephemeral function filesystem. Without this variable, local filesystem storage is used for development only.
+
 ### Cloud connections
 
 The Web app uses **connections, not provider IDs**.
@@ -69,9 +73,9 @@ Supported browser resource types in the Web MVP include HTML, CSS, JavaScript, J
 
 ## Storage note
 
-The Web MVP currently uses the server filesystem as its storage provider. This is suitable for a normal server/VPS. Serverless platforms such as Vercel use ephemeral filesystem storage, so Vercel is currently suitable for testing the Web UI/API rather than final persistent storage.
+The Web MVP uses durable Vercel Blob storage when `BLOB_READ_WRITE_TOKEN` is configured, with a local filesystem fallback for development. This avoids losing uploaded encrypted objects and user metadata when a Vercel function instance is replaced. The browser still uploads only client-encrypted file bytes.
 
-The storage layer is designed so Google Drive, Dropbox, OneDrive, WebDAV, S3-compatible storage, or another provider can be plugged in while the browser continues uploading only encrypted objects.
+Google Drive, Dropbox, OneDrive and WebDAV remain available as external storage connections.
 
 ## Desktop MVP
 
