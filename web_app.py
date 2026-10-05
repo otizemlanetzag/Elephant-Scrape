@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -128,19 +129,6 @@ def save_manifest(items: list[dict[str, Any]]) -> None:
 
 def blob_path(file_id: str) -> Path:
     return user_dir() / (safe_id(file_id) + ".blob")
-
-@app.after_request
-def security_headers(response: Response):
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-        "connect-src 'self'; frame-ancestors 'none'"
-    )
-    return response
 
 @app.get("/")
 def index():
@@ -295,8 +283,12 @@ def website_for_host(host: str):
     host=(host or "").split(":",1)[0].lower().rstrip("."); return next((x for x in load_websites() if x.get("domain","").lower()==host),None)
 
 def safe_site_path(value: str) -> str:
-    parts=[p for p in urllib.parse.unquote(value or "").lstrip("/").split("/") if p]
-    if any(p in {".",".."} for p in parts): abort(404)
+    value = security_clean_relative_path(urllib.parse.unquote(value or ""))
+    if not security_site_file_allowed(value):
+        abort(403, "This file type cannot be served as a website resource.")
+    parts = [p for p in value.split("/") if p]
+    if any(p.startswith(".") for p in parts):
+        abort(404)
     return "/".join(parts) or "index.html"
 
 def site_cache_key(site, relative):
