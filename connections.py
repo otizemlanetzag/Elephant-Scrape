@@ -10,6 +10,30 @@ from typing import Any
 
 from cryptography.fernet import Fernet
 
+BLOB_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN") or os.environ.get("VERCEL_BLOB_READ_WRITE_TOKEN")
+BLOB_BASE = "https://blob.vercel-storage.com"
+
+def _blob_path(path: Path) -> str:
+    # Keep the per-user path, but never expose the machine's absolute path.
+    parts = list(path.parts)
+    marker = "connections"
+    if marker in parts:
+        uid = parts[parts.index(marker) - 1] if parts.index(marker) else "unknown"
+    else:
+        uid = path.parent.name or "unknown"
+    return f"elephant-scrape/{uid}/connections/connections.json"
+
+def _blob_call(path: Path, method: str = "GET", data: bytes | None = None):
+    if not BLOB_TOKEN: return None
+    req = urllib.request.Request(
+        BLOB_BASE + "/" + _blob_path(path), method=method, data=data,
+        headers={"Authorization":"Bearer "+BLOB_TOKEN,"x-api-version":"7","x-content-type":"application/json", "x-add-random-suffix":"0", "x-allow-overwrite":"1"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response: return response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404: return None
+        raise
+
 OAUTH = {
     "google": {
         "name": "Google Drive",
@@ -42,10 +66,15 @@ def cipher():
     return Fernet(key.encode()) if key else None
 
 def load(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = _blob_call(path) if BLOB_TOKEN else None
+        if BLOB_TOKEN and raw is None:
+            return []
+        if raw is not None:
+            data = json.loads(raw.decode("utf-8"))
+        else:
+            if not path.exists(): return []
+            data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, list):
             return []
         f = cipher()
@@ -65,8 +94,12 @@ def save(path: Path, items: list[dict[str, Any]]) -> None:
     for item in stored:
         if item.get("token"):
             item["token"] = f.encrypt(item["token"].encode()).decode()
+    payload = json.dumps(stored, ensure_ascii=False, indent=2).encode("utf-8")
+    if BLOB_TOKEN:
+        _blob_call(path, "PUT", payload)
+        return
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_bytes(payload)
     os.replace(tmp, path)
 
 def start_oauth(provider: str, redirect_uri: str):
