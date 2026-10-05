@@ -273,7 +273,7 @@ def load_settings() -> dict[str, Any]:
 def save_settings(data: dict[str, Any]) -> None:
     tmp = settings_path().with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, SETTINGS)
+    os.replace(tmp, settings_path())
 
 def load_websites() -> list[dict[str, Any]]:
     if not WEBSITES.exists(): return []
@@ -300,14 +300,24 @@ def api_websites():
     return jsonify([x for x in load_websites() if x.get("owner_id") == current])
 
 def api_publish_website():
-    data=request.get_json(silent=True) or {}; folder=valid_site_folder(str(data.get("folder",""))); name=valid_site_name(str(data.get("name",folder.split("/")[-1])))
-    domain=str(data.get("domain","")).strip().lower(); base=os.environ.get("ELEPHANT_SITE_BASE_DOMAIN","").strip().lower()
+    data=request.get_json(silent=True) or {}
+    folder=valid_site_folder(str(data.get("folder","")))
+    name=valid_site_name(str(data.get("name",folder.split("/")[-1])))
+    domain=str(data.get("domain","")).strip().lower()
+    deydn=str(data.get("deydn_name","")).strip().lower()
+    base=os.environ.get("ELEPHANT_SITE_BASE_DOMAIN","").strip().lower()
+    if deydn:
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", deydn): abort(400,"Invalid site.deydn.io address.")
+        domain=deydn+".site.deydn.io"
     if not domain:
         if not base: abort(400,"Set ELEPHANT_SITE_BASE_DOMAIN or enter a custom domain.")
         domain=name+"."+base
-    if not re.fullmatch(r"[a-z0-9.-]+",domain): abort(400,"Invalid domain.")
-    items=[x for x in load_websites() if x.get("domain")!=domain and x.get("name")!=name]
-    site={"name":name,"folder":folder,"domain":domain,"provider":str(data.get("provider","local")).lower(),"entrypoint":"index.html","created":int(time.time()),"published":True,"hide_from_search":bool(data.get("hide_from_search",False)),"owner_id":user_id()}
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",domain) or len(domain)>253: abort(400,"Invalid domain.")
+    owner=user_id()
+    items=load_websites()
+    if any(x.get("domain","").lower()==domain and x.get("owner_id")!=owner for x in items): abort(409,"That domain is already assigned to another website.")
+    if any(x.get("name")==name and x.get("owner_id")==owner for x in items): abort(409,"That website name already exists.")
+    site={"name":name,"folder":folder,"domain":domain,"provider":str(data.get("provider","local")).lower(),"entrypoint":"index.html","created":int(time.time()),"published":True,"hide_from_search":bool(data.get("hide_from_search",False)),"owner_id":owner}
     items.append(site); save_websites(items); return jsonify(site),201
 
 def api_update_website(name):
@@ -320,7 +330,7 @@ def api_update_website(name):
 
 def api_add_sandstorm(name):
     name=valid_site_name(name)
-    items=load_websites(); site=next((x for x in items if x.get("name")==name),None)
+    items=load_websites(); site=next((x for x in items if x.get("name")==name and x.get("owner_id")==user_id()),None)
     if not site: abort(404)
     site["in_sandstorm"]=True
     site["sandstorm_url"]=site.get("domain")
@@ -393,11 +403,11 @@ def serve_published_site():
     cached = read_site_cache(site, relative)
     if cached:
         data, cached_name = cached
-        response = browser_site_response(data, cached_name)
+        response = browser_site_response(data, cached_name, load_settings_for_owner(site.get("owner_id")))
     else:
         data = target.read_bytes()
         write_site_cache(site, relative, data, target.name)
-        response = browser_site_response(data, target.name)
+        response = browser_site_response(data, target.name, load_settings_for_owner(site.get("owner_id")))
     if site.get("hide_from_search", False) and target.suffix.lower() in {".html",".htm"}:
         response.headers["X-Robots-Tag"]="noindex, nofollow, noarchive"
     return response
@@ -416,7 +426,16 @@ def html_content_type(name: str) -> str | None:
         return "image/svg+xml"
     return None
 
-def browser_site_response(data: bytes, name: str) -> Response:
+def load_settings_for_owner(owner_id: str | None) -> dict[str, Any]:
+    defaults={"anti_analytics": True}
+    if not owner_id: return defaults
+    try:
+        data=json.loads((owner_dir(owner_id)/"settings.json").read_text(encoding="utf-8"))
+        return {**defaults, **(data if isinstance(data, dict) else {})}
+    except (OSError, ValueError, TypeError):
+        return defaults
+
+def browser_site_response(data: bytes, name: str, anti_analytics: bool | None = None) -> Response:
     content_type = html_content_type(name)
     if not content_type:
         abort(415, "This stored file is not a browser site resource.")
@@ -425,7 +444,9 @@ def browser_site_response(data: bytes, name: str) -> Response:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "public, max-age=60, stale-while-revalidate=300"
-    if load_settings().get("anti_analytics", True):
+    if anti_analytics is None:
+        anti_analytics = load_settings().get("anti_analytics", True)
+    if anti_analytics:
         response.headers["Content-Security-Policy"] = (
             "sandbox allow-scripts allow-forms allow-popups; "
             "default-src 'self' data: blob:; "
