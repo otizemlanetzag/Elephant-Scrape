@@ -28,6 +28,68 @@ SITE_CACHE = BASE_DIR / "site_cache"
 SITE_CACHE_TTL = 600
 SITE_CACHE.mkdir(parents=True, exist_ok=True)
 
+
+# --- Security hardening -------------------------------------------------
+SECURITY_MAX_PATH = 240
+SECURITY_MAX_WEBSITE_NAME = 63
+SECURITY_ALLOWED_SITE_EXTENSIONS = {
+    ".html", ".htm", ".css", ".js", ".json", ".svg",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
+    ".txt", ".xml", ".map", ".woff", ".woff2", ".ttf"
+}
+SECURITY_BLOCKED_SITE_EXTENSIONS = {
+    ".py", ".sh", ".bat", ".cmd", ".ps1", ".exe", ".dll",
+    ".so", ".dylib", ".php", ".asp", ".aspx", ".jsp"
+}
+
+def security_clean_relative_path(value: str) -> str:
+    value = str(value or "").replace("\\", "/").strip()
+    if len(value) > SECURITY_MAX_PATH:
+        abort(400, "Path is too long.")
+    parts = [p for p in value.split("/") if p not in ("", ".")]
+    if any(p == ".." or "\x00" in p for p in parts):
+        abort(403, "Unsafe path.")
+    return "/".join(parts)
+
+def security_site_file_allowed(relative: str) -> bool:
+    suffix = Path(relative).suffix.lower()
+    if suffix in SECURITY_BLOCKED_SITE_EXTENSIONS:
+        return False
+    return suffix in SECURITY_ALLOWED_SITE_EXTENSIONS or suffix == ""
+
+def security_request_checks():
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if request.content_length and request.content_length > MAX_UPLOAD + 4 * 1024 * 1024:
+            abort(413, "Request is too large.")
+    if len(request.path) > SECURITY_MAX_PATH:
+        abort(414, "Request path is too long.")
+    user_agent = request.headers.get("User-Agent", "")
+    if len(user_agent) > 1024:
+        abort(400, "Invalid request headers.")
+
+@app.before_request
+def security_before_request():
+    security_request_checks()
+
+@app.after_request
+def security_hardening_headers(response):
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["X-DNS-Prefetch-Control"] = "off"
+    response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self';"
+    )
+    return response
+# -------------------------------------------------------------------------
+
 def user_id() -> str:
     uid = session.get("uid")
     if not uid:
