@@ -81,14 +81,15 @@ def security_hardening_headers(response):
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     response.headers["X-DNS-Prefetch-Control"] = "off"
     response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
-        "form-action 'self'; img-src 'self' data:; "
-        "style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "connect-src 'self';"
-    )
+    if "Content-Security-Policy" not in response.headers:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
+            "form-action 'self'; img-src 'self' data:; "
+            "style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "connect-src 'self';"
+        )
     return response
 # -------------------------------------------------------------------------
 
@@ -391,7 +392,7 @@ def serve_published_site():
     site=website_for_host(request.host)
     if not site or not site.get("published", True): abort(404,"Website is not published.")
     if request.path == "/robots.txt":
-        body = "User-agent: *\\nDisallow: /\\n" if site.get("hide_from_search", False) else "User-agent: *\\nAllow: /\\n"
+        body = "User-agent: *\nDisallow: /\n" if site.get("hide_from_search", False) else "User-agent: *\nAllow: /\n"
         return Response(body, content_type="text/plain; charset=utf-8")
     relative = safe_site_path(request.path)
     root=(owner_dir(site.get("owner_id",""))/site["folder"]).resolve()
