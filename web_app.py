@@ -22,10 +22,10 @@ MAX_UPLOAD = int(os.environ.get("ELEPHANT_MAX_UPLOAD", str(512 * 1024 * 1024)))
 app = Flask(__name__)
 app.secret_key = os.environ.get("ELEPHANT_SESSION_SECRET", secrets.token_hex(32))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD + 4 * 1024 * 1024
-CONNECTIONS = BASE_DIR / "connections" / "connections.json"
-CONNECTIONS.parent.mkdir(parents=True, exist_ok=True)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("ELEPHANT_COOKIE_SECURE", "1") != "0"
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 WEBSITES = BASE_DIR / "websites.json"
-SETTINGS = BASE_DIR / "settings.json"
 SITE_CACHE = BASE_DIR / "site_cache"
 SITE_CACHE_TTL = 600
 SITE_CACHE.mkdir(parents=True, exist_ok=True)
@@ -101,6 +101,24 @@ def user_id() -> str:
 
 def user_dir() -> Path:
     path = BASE_DIR / user_id()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+def connections_path() -> Path:
+    path = user_dir() / "connections" / "connections.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+def settings_path() -> Path:
+    return user_dir() / "settings.json"
+
+def owner_dir(owner_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,100}", owner_id or ""):
+        abort(404)
+    root = BASE_DIR.resolve()
+    path = (BASE_DIR / owner_id).resolve()
+    if path.parent != root:
+        abort(404)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -200,7 +218,7 @@ def api_update_settings():
 
 @app.get("/api/connections")
 def api_connections():
-    return jsonify([{"provider": x["provider"], "name": x["name"], "mode": x["mode"]} for x in load_connections(CONNECTIONS)])
+    return jsonify([{"provider": x["provider"], "name": x["name"], "mode": x["mode"]} for x in load_connections(connections_path())])
 
 @app.post("/api/connections/token")
 def api_token_connection():
@@ -209,14 +227,14 @@ def api_token_connection():
     token = str(data.get("token", "")).strip()
     if provider not in {"google", "dropbox", "onedrive", "webdav"} or not token:
         abort(400, "Provider and token are required.")
-    items = [x for x in load_connections(CONNECTIONS) if x.get("provider") != provider]
+    items = [x for x in load_connections(connections_path()) if x.get("provider") != provider]
     items.append({"provider": provider, "name": data.get("name") or provider.title(), "mode": "token", "token": token})
-    save_connections(CONNECTIONS, items)
+    save_connections(connections_path(), items)
     return jsonify({"ok": True})
 
 @app.delete("/api/connections/<provider>")
 def api_disconnect(provider):
-    save_connections(CONNECTIONS, [x for x in load_connections(CONNECTIONS) if x.get("provider") != provider.lower()])
+    save_connections(connections_path(), [x for x in load_connections(connections_path()) if x.get("provider") != provider.lower()])
     return jsonify({"ok": True})
 
 @app.get("/connect/<provider>")
@@ -237,23 +255,23 @@ def oauth_callback():
     tokens = finish_oauth(provider, code, request.url_root.rstrip("/") + "/oauth/callback")
     if not tokens.get("access_token"):
         abort(400, "The provider returned no access token.")
-    items = [x for x in load_connections(CONNECTIONS) if x.get("provider") != provider]
+    items = [x for x in load_connections(connections_path()) if x.get("provider") != provider]
     items.append({"provider": provider, "name": OAUTH[provider]["name"], "mode": "oauth", "token": json.dumps(tokens)})
-    save_connections(CONNECTIONS, items)
+    save_connections(connections_path(), items)
     return redirect("/?connected=" + urllib.parse.quote(OAUTH[provider]["name"]))
 
 def load_settings() -> dict[str, Any]:
     defaults = {"anti_analytics": True}
-    if not SETTINGS.exists():
+    if not settings_path().exists():
         return defaults.copy()
     try:
-        data = json.loads(SETTINGS.read_text(encoding="utf-8"))
+        data = json.loads(settings_path().read_text(encoding="utf-8"))
         return {**defaults, **(data if isinstance(data, dict) else {})}
     except (OSError, ValueError, TypeError):
         return defaults.copy()
 
 def save_settings(data: dict[str, Any]) -> None:
-    tmp = SETTINGS.with_suffix(".tmp")
+    tmp = settings_path().with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, SETTINGS)
 
@@ -277,7 +295,9 @@ def valid_site_folder(value: str) -> str:
     if not value or ".." in Path(value).parts: abort(400, "Invalid website folder.")
     return value
 
-def api_websites(): return jsonify(load_websites())
+def api_websites():
+    current = user_id()
+    return jsonify([x for x in load_websites() if x.get("owner_id") == current])
 
 def api_publish_website():
     data=request.get_json(silent=True) or {}; folder=valid_site_folder(str(data.get("folder",""))); name=valid_site_name(str(data.get("name",folder.split("/")[-1])))
@@ -287,12 +307,12 @@ def api_publish_website():
         domain=name+"."+base
     if not re.fullmatch(r"[a-z0-9.-]+",domain): abort(400,"Invalid domain.")
     items=[x for x in load_websites() if x.get("domain")!=domain and x.get("name")!=name]
-    site={"name":name,"folder":folder,"domain":domain,"provider":str(data.get("provider","local")).lower(),"entrypoint":"index.html","created":int(time.time()),"published":True,"hide_from_search":bool(data.get("hide_from_search",False))}
+    site={"name":name,"folder":folder,"domain":domain,"provider":str(data.get("provider","local")).lower(),"entrypoint":"index.html","created":int(time.time()),"published":True,"hide_from_search":bool(data.get("hide_from_search",False)),"owner_id":user_id()}
     items.append(site); save_websites(items); return jsonify(site),201
 
 def api_update_website(name):
     name=valid_site_name(name); data=request.get_json(silent=True) or {}
-    items=load_websites(); site=next((x for x in items if x.get("name")==name),None)
+    items=load_websites(); site=next((x for x in items if x.get("name")==name and x.get("owner_id")==user_id()),None)
     if not site: abort(404)
     if "hide_from_search" in data: site["hide_from_search"]=bool(data["hide_from_search"])
     if "published" in data: site["published"]=bool(data["published"])
@@ -308,7 +328,7 @@ def api_add_sandstorm(name):
     return jsonify({"ok":True,"in_sandstorm":True,"url":site.get("domain")})
 
 def api_unpublish_website(name):
-    name=valid_site_name(name); items=load_websites(); remaining=[x for x in items if x.get("name")!=name]
+    name=valid_site_name(name); items=load_websites(); current=user_id(); remaining=[x for x in items if not (x.get("name")==name and x.get("owner_id")==current)]
     if len(remaining)==len(items): abort(404)
     save_websites(remaining); return jsonify({"ok":True})
 
@@ -325,7 +345,7 @@ def safe_site_path(value: str) -> str:
     return "/".join(parts) or "index.html"
 
 def site_cache_key(site, relative):
-    raw = (str(site.get("name","")) + "\0" + relative).encode("utf-8")
+    raw = (str(site.get("owner_id","")) + "\0" + str(site.get("name","")) + "\0" + relative).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 def read_site_cache(site, relative):
@@ -363,18 +383,20 @@ def serve_published_site():
     if request.path == "/robots.txt":
         body = "User-agent: *\\nDisallow: /\\n" if site.get("hide_from_search", False) else "User-agent: *\\nAllow: /\\n"
         return Response(body, content_type="text/plain; charset=utf-8")
-    root=(user_dir()/site["folder"]).resolve(); target=(root/safe_site_path(request.path)).resolve()
+    relative = safe_site_path(request.path)
+    root=(owner_dir(site.get("owner_id",""))/site["folder"]).resolve()
+    target=(root/relative).resolve()
     if root not in target.parents and target!=root: abort(404)
     if not target.is_file() and request.path.endswith("/"): target=(root/"index.html").resolve()
     if not target.is_file(): abort(404)
     cleanup_site_cache()
-    cached = read_site_cache(site, safe_site_path(request.path))
+    cached = read_site_cache(site, relative)
     if cached:
         data, cached_name = cached
         response = browser_site_response(data, cached_name)
     else:
         data = target.read_bytes()
-        write_site_cache(site, safe_site_path(request.path), data, target.name)
+        write_site_cache(site, relative, data, target.name)
         response = browser_site_response(data, target.name)
     if site.get("hide_from_search", False) and target.suffix.lower() in {".html",".htm"}:
         response.headers["X-Robots-Tag"]="noindex, nofollow, noarchive"
@@ -430,7 +452,7 @@ def browser_site_response(data: bytes, name: str) -> Response:
     return response
 
 def google_connection_token():
-    for item in load_connections(CONNECTIONS):
+    for item in load_connections(connections_path()):
         if item.get("provider") == "google":
             raw = item.get("token")
             if not raw:
