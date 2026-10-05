@@ -19,6 +19,29 @@ import tkinter.simpledialog as simpledialog
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+    class _DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+    def _dpapi_protect(data: bytes) -> bytes:
+        blob = _DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))
+        out = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptProtectData(ctypes.byref(blob), "Elephant Scrape", None, None, None, 0, ctypes.byref(out)):
+            raise OSError("Windows DPAPI encryption failed")
+        try: return ctypes.string_at(out.pbData, out.cbData)
+        finally: ctypes.windll.kernel32.LocalFree(out.pbData)
+    def _dpapi_unprotect(data: bytes) -> bytes:
+        blob = _DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))
+        out = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(blob), None, None, None, None, 0, ctypes.byref(out)):
+            raise OSError("Windows DPAPI decryption failed")
+        try: return ctypes.string_at(out.pbData, out.cbData)
+        finally: ctypes.windll.kernel32.LocalFree(out.pbData)
+else:
+    _dpapi_protect = None
+    _dpapi_unprotect = None
+
 
 APP_NAME = "Elephant Scrape"
 FORMAT_MAGIC = b"ELEPHANT1"
@@ -676,7 +699,8 @@ class ElephantApp:
         self.provider = LocalFolderProvider("Computer storage", self.local_storage)
         self.router = StorageRouter()
         self.router.add_provider(self.provider)
-        self.provider_config = self.base / "providers.json"
+        self.provider_config = self.base / "providers.secure"
+        self.legacy_provider_config = self.base / "providers.json"
         self._load_connected_providers()
 
         self.key_path = self.base / "vault.key"
@@ -985,11 +1009,34 @@ class ElephantApp:
             "future recommendation service."
         )
 
+    def _read_provider_config(self):
+        if self.provider_config.exists():
+            raw = self.provider_config.read_bytes()
+            if os.name == "nt":
+                return json.loads(_dpapi_unprotect(raw).decode("utf-8"))
+            return json.loads(base64.b64decode(raw).decode("utf-8"))
+        if self.legacy_provider_config.exists():
+            configs = json.loads(self.legacy_provider_config.read_text(encoding="utf-8"))
+            self._write_provider_config(configs)
+            try: self.legacy_provider_config.replace(self.legacy_provider_config.with_suffix(".legacy"))
+            except OSError: pass
+            return configs
+        return []
+
+    def _write_provider_config(self, configs):
+        payload = json.dumps(configs, ensure_ascii=False, indent=2).encode("utf-8")
+        protected = _dpapi_protect(payload) if os.name == "nt" else base64.b64encode(payload)
+        tmp = self.provider_config.with_suffix(".tmp")
+        tmp.write_bytes(protected)
+        os.replace(tmp, self.provider_config)
+        try: os.chmod(self.provider_config, 0o600)
+        except OSError: pass
+
     def _load_connected_providers(self):
-        if not self.provider_config.exists():
+        if not self.provider_config.exists() and not self.legacy_provider_config.exists():
             return
         try:
-            configs = json.loads(self.provider_config.read_text(encoding="utf-8"))
+            configs = self._read_provider_config()
             for item in configs:
                 if item.get("type") == "local":
                     path = Path(item["folder"])
@@ -1022,9 +1069,7 @@ class ElephantApp:
                 configs.append({"type": "local", "name": provider.name, "folder": str(provider.folder)})
             elif isinstance(provider, OAuthProvider):
                 configs.append({
-                    "type": "oauth",
-                    "provider": provider.oauth_name,
-                    "name": provider.name,
+                    "type": "oauth", "provider": provider.oauth_name, "name": provider.name,
                     "token": provider.token,
                     "objects": getattr(provider, "_ids", getattr(provider, "_paths", {})),
                 })
@@ -1033,13 +1078,7 @@ class ElephantApp:
                     "type": "webdav", "name": provider.name, "url": provider.url,
                     "username": provider.username, "password": provider.password,
                 })
-        tmp = self.provider_config.with_suffix(".tmp")
-        tmp.write_text(json.dumps(configs, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self.provider_config)
-        try:
-            os.chmod(self.provider_config, 0o600)
-        except OSError:
-            pass
+        self._write_provider_config(configs)
 
     def add_storage(self):
         win = tk.Toplevel(self.root)
