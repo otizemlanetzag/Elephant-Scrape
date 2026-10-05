@@ -336,7 +336,7 @@ def save_settings(data: dict[str, Any]) -> None:
 def load_websites() -> list[dict[str, Any]]:
     try:
         if blob_enabled():
-            raw = blob_request(durable_path("websites", user_id(), "websites.json"))
+            raw = blob_request(blob_object_path("elephant-scrape", "websites.json"))
             if not raw: return []
             data = json.loads(raw.decode("utf-8"))
         else:
@@ -348,7 +348,7 @@ def load_websites() -> list[dict[str, Any]]:
 def save_websites(items: list[dict[str, Any]]) -> None:
     payload = json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")
     if blob_enabled():
-        blob_request(durable_path("websites", user_id(), "websites.json"), "PUT", payload, "application/json")
+        blob_request(blob_object_path("elephant-scrape", "websites.json"), "PUT", payload, "application/json")
         return
     tmp = WEBSITES.with_suffix(".tmp")
     tmp.write_bytes(payload)
@@ -499,7 +499,12 @@ def load_settings_for_owner(owner_id: str | None) -> dict[str, Any]:
     defaults={"anti_analytics": True}
     if not owner_id: return defaults
     try:
-        data=json.loads((owner_dir(owner_id)/"settings.json").read_text(encoding="utf-8"))
+        if blob_enabled():
+            raw=blob_request(durable_path("settings", owner_id, "settings.json"))
+            if not raw: return defaults
+            data=json.loads(raw.decode("utf-8"))
+        else:
+            data=json.loads((owner_dir(owner_id)/"settings.json").read_text(encoding="utf-8"))
         return {**defaults, **(data if isinstance(data, dict) else {})}
     except (OSError, ValueError, TypeError):
         return defaults
