@@ -81,7 +81,11 @@ def load(path: Path) -> list[dict[str, Any]]:
         if f:
             for item in data:
                 if item.get("token"):
-                    item["token"] = f.decrypt(item["token"].encode()).decode()
+                    plain = f.decrypt(item["token"].encode()).decode("utf-8")
+                    try:
+                        item["token"] = json.loads(plain)
+                    except ValueError:
+                        item["token"] = plain
         return data
     except Exception:
         return []
@@ -92,8 +96,11 @@ def save(path: Path, items: list[dict[str, Any]]) -> None:
         raise RuntimeError("ELEPHANT_SERVER_KEY is required for token storage.")
     stored = json.loads(json.dumps(items))
     for item in stored:
-        if item.get("token"):
-            item["token"] = f.encrypt(item["token"].encode()).decode()
+        token = item.get("token")
+        if token:
+            if isinstance(token, dict):
+                token = json.dumps(token, separators=(",", ":"))
+            item["token"] = f.encrypt(str(token).encode("utf-8")).decode("ascii")
     payload = json.dumps(stored, ensure_ascii=False, indent=2).encode("utf-8")
     if BLOB_TOKEN:
         _blob_call(path, "PUT", payload)
