@@ -880,19 +880,36 @@ class ElephantApp:
         return result
 
     def upload(self):
-        paths = filedialog.askopenfilenames(title="Select files to upload")
-        if not paths:
+        path = filedialog.askopenfilename(title="Choose a file")
+        if not path:
             return
-        for filename in paths:
-            data = Path(filename).read_bytes()
-            try:
-                placements = self.router.put(Path(filename).name, data)
-                self.index.items[Path(filename).name] = {"placements": [p.provider.name for p in placements]}
-            except Exception as exc:
-                messagebox.showerror("Upload failed", str(exc), parent=self.root)
-                return
-        self.index.save()
-        self.refresh_files()
+        source = Path(path)
+        try:
+            data = source.read_bytes()
+            security = DownloadSecurity.inspect(source.name, data)
+            if not security["safe"]:
+                raise ValueError("Unsafe source file: " + " ".join(security["reasons"]))
+            object_name = hashlib.sha256(os.urandom(32)).hexdigest() + ".es"
+            if self.unencrypted.get():
+                if not messagebox.askyesno("Encryption disabled",
+                        "Store this file without client-side encryption? The storage provider may read it.",
+                        icon="warning", parent=self.root):
+                    return
+                blob, encrypted = data, False
+            else:
+                metadata = {"filename": source.name, "size": len(data),
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                            "type": security["kind"]}
+                blob, encrypted = self.vault.encrypt(data, metadata), True
+            placement = self.router.put(blob, object_name)
+            self.index.items[object_name] = {
+                "provider": placement.provider.name, "encrypted": encrypted,
+                "filename_hint": source.name if not encrypted else None,
+                "size": len(data), "security_type": security["kind"]}
+            self.index.save()
+            self.refresh()
+        except Exception as exc:
+            messagebox.showerror("Upload failed", str(exc), parent=self.root)
 
     def download(self):
         selected = self._selected_items()
