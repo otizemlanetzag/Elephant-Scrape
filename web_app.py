@@ -16,7 +16,14 @@ import urllib.parse
 import urllib.request
 
 APP_NAME = "Elephant Scrape"
-BASE_DIR = Path(os.environ.get("ELEPHANT_DATA_DIR", Path.cwd() / ".elephant_data"))
+# Vercel's deployment filesystem is read-only. Use /tmp there; durable
+# application data is stored in Vercel Blob when BLOB_READ_WRITE_TOKEN exists.
+if os.environ.get("ELEPHANT_DATA_DIR"):
+    BASE_DIR = Path(os.environ["ELEPHANT_DATA_DIR"])
+elif os.environ.get("VERCEL") == "1":
+    BASE_DIR = Path("/tmp/elephant_data")
+else:
+    BASE_DIR = Path.cwd() / ".elephant_data"
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD = int(os.environ.get("ELEPHANT_MAX_UPLOAD", str(512 * 1024 * 1024)))
 
