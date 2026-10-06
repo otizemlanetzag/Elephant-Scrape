@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -23,7 +24,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("ELEPHANT_SESSION_SECRET", secrets.token_hex(32))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD + 4 * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SECURE"] = os.environ.get("ELEPHANT_COOKIE_SECURE", "1") != "0"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("ELEPHANT_COOKIE_SECURE", "0") == "1"
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 WEBSITES = BASE_DIR / "websites.json"
 SITE_CACHE = BASE_DIR / "site_cache"
@@ -383,6 +384,12 @@ def api_publish_website():
         domain=name+"."+base
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",domain) or len(domain)>253: abort(400,"Invalid domain.")
     owner=user_id()
+    site_root=(owner_dir(owner)/folder).resolve()
+    owner_root=owner_dir(owner).resolve()
+    if owner_root not in site_root.parents or not site_root.is_dir():
+        abort(404,"WEBSITE folder does not exist.")
+    if not (site_root/"index.html").is_file():
+        abort(400,"WEBSITE folder must contain index.html.")
     items=load_websites()
     if any(x.get("domain","").lower()==domain and x.get("owner_id")!=owner for x in items): abort(409,"That domain is already assigned to another website.")
     if any(x.get("name")==name and x.get("owner_id")==owner for x in items): abort(409,"That website name already exists.")
@@ -407,9 +414,13 @@ def api_add_sandstorm(name):
     return jsonify({"ok":True,"in_sandstorm":True,"url":site.get("domain")})
 
 def api_unpublish_website(name):
-    name=valid_site_name(name); items=load_websites(); current=user_id(); remaining=[x for x in items if not (x.get("name")==name and x.get("owner_id")==current)]
-    if len(remaining)==len(items): abort(404)
-    save_websites(remaining); return jsonify({"ok":True})
+    name=valid_site_name(name)
+    items=load_websites()
+    site=next((x for x in items if x.get("name")==name and x.get("owner_id")==user_id()),None)
+    if not site: abort(404)
+    site["published"]=False
+    save_websites(items)
+    return jsonify({"ok":True,"published":False})
 
 def website_for_host(host: str):
     host=(host or "").split(":",1)[0].lower().rstrip("."); return next((x for x in load_websites() if x.get("domain","").lower()==host),None)
@@ -485,15 +496,12 @@ def html_content_type(name: str) -> str | None:
     lower = name.lower()
     if lower.endswith((".html", ".htm")):
         return "text/html; charset=utf-8"
-    if lower.endswith(".css"):
-        return "text/css; charset=utf-8"
     if lower.endswith(".js"):
         return "text/javascript; charset=utf-8"
     if lower.endswith(".json"):
         return "application/json; charset=utf-8"
-    if lower.endswith((".svg",)):
-        return "image/svg+xml"
-    return None
+    guessed, _ = mimetypes.guess_type(lower)
+    return guessed
 
 def load_settings_for_owner(owner_id: str | None) -> dict[str, Any]:
     defaults={"anti_analytics": True}
@@ -522,7 +530,7 @@ def browser_site_response(data: bytes, name: str, anti_analytics: bool | None = 
         anti_analytics = load_settings().get("anti_analytics", True)
     if anti_analytics:
         response.headers["Content-Security-Policy"] = (
-            "sandbox allow-scripts allow-forms allow-popups; "
+            
             "default-src 'self' data: blob:; "
             "base-uri 'none'; object-src 'none'; "
             "img-src 'self' data: blob:; "
@@ -701,7 +709,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 10p
 <footer class="status" id="status">Ready.</footer></div>
 <input id="fileInput" type="file" multiple class="hidden">
 <div class="modal" id="vaultModal"><div class="box"><h2>Vault passphrase</h2><p>Your passphrase stays in this browser tab. It is never sent to Elephant Scrape.</p><input id="passphrase" type="password" autocomplete="new-password" placeholder="Choose or enter your vault passphrase"><div class="warning">If you forget this passphrase, encrypted files cannot be recovered by the server.</div><div class="actions"><button id="vaultCancel">Cancel</button><button class="primary" id="vaultSave">Unlock vault</button></div></div></div>
-<div class="modal" id="settingsModal"><div class="box"><h2>Settings</h2><label style="display:flex;align-items:center;gap:10px;margin:16px 0"><input id="antiAnalytics" type="checkbox" style="width:auto;margin:0"><span><strong>Block Analytics & Tracking</strong><small style="display:block;color:var(--muted);margin-top:5px">Blocks third-party analytics, tracking pixels, telemetry connections and remote tracker scripts for published WEBSITE sites. Enabled by default.</small></span></label><div class="warning">When enabled, published WEBSITE pages can only make network requests to Elephant Scrape itself. Turn it off if a website needs external services.</div><div class="actions"><button id="settingsClose">Close</button><button class="primary" id="settingsSave">Save settings</button></div></div></div><div class="modal" id="websiteModal"><div class="box"><h2>Publish a WEBSITE folder</h2><p>Each WEBSITE folder gets its own domain or subdomain.</p><label>Folder</label><input id="websiteFolder" placeholder="my-site"><label>Website name</label><input id="websiteName" placeholder="my-site"><label>Domain (optional)</label><input id="websiteDomain" placeholder="my-site.example.com"><div class="warning">DuckDNS and No-IP can provide DNS/DDNS hostnames. The files remain in Elephant Scrape storage.</div><div class="actions"><button id="websiteCancel">Cancel</button><button class="primary" id="websitePublish">Publish Website</button></div><div id="websiteList" style="margin-top:18px"></div></div></div><div class="modal" id="connectionsModal"><div class="box"><h2>Storage connections</h2><p>Connect normally — no provider IDs are needed. You can also paste a token.</p><div id="connectionList"></div><hr><h3>Token</h3><select id="tokenProvider" style="width:100%;padding:11px"><option value="google">Google Drive</option><option value="dropbox">Dropbox</option><option value="onedrive">OneDrive</option><option value="webdav">WebDAV</option></select><input id="tokenValue" type="password" placeholder="Paste token"><div class="actions"><button id="connectionsClose">Close</button><button class="primary" id="tokenConnect">Connect token</button></div></div></div><script>
+<div class="modal" id="settingsModal"><div class="box"><h2>Settings</h2><label style="display:flex;align-items:center;gap:10px;margin:16px 0"><input id="antiAnalytics" type="checkbox" style="width:auto;margin:0"><span><strong>Block Analytics & Tracking</strong><small style="display:block;color:var(--muted);margin-top:5px">Blocks third-party analytics, tracking pixels, telemetry connections and remote tracker scripts for published WEBSITE sites. Enabled by default.</small></span></label><div class="warning">When enabled, published WEBSITE pages can only make network requests to Elephant Scrape itself. Turn it off if a website needs external services.</div><div class="actions"><button id="settingsClose">Close</button><button class="primary" id="settingsSave">Save settings</button></div></div></div><div class="modal" id="websiteModal"><div class="box"><h2>Publish a WEBSITE folder</h2><p>Each WEBSITE folder gets its own domain or subdomain.</p><label>Folder</label><input id="websiteFolder" placeholder="my-site"><label>Website name</label><input id="websiteName" placeholder="my-site"><label>Domain (optional)</label><input id="websiteDomain" placeholder="my-site.example.com"><label>site.deydn.io address (optional)</label><input id="websiteDeydn" placeholder="my-site"><label style="display:flex;align-items:center;gap:8px"><input id="hideFromSearch" type="checkbox" style="width:auto;margin:0">Hide this website from search engines</label><div class="warning">DuckDNS and No-IP can provide DNS/DDNS hostnames. The files remain in Elephant Scrape storage.</div><div class="actions"><button id="websiteCancel">Cancel</button><button class="primary" id="websitePublish">Publish Website</button></div><div id="websiteList" style="margin-top:18px"></div></div></div><div class="modal" id="connectionsModal"><div class="box"><h2>Storage connections</h2><p>Connect normally — no provider IDs are needed. You can also paste a token.</p><div id="connectionList"></div><hr><h3>Token</h3><select id="tokenProvider" style="width:100%;padding:11px"><option value="google">Google Drive</option><option value="dropbox">Dropbox</option><option value="onedrive">OneDrive</option><option value="webdav">WebDAV</option></select><input id="tokenValue" type="password" placeholder="Paste token"><div class="actions"><button id="connectionsClose">Close</button><button class="primary" id="tokenConnect">Connect token</button></div></div></div><script>
 const state={key:null,salt:null,files:[]},$=id=>document.getElementById(id),enc=new TextEncoder(),dec=new TextDecoder();
 function b64(buf){return btoa(String.fromCharCode(...new Uint8Array(buf)))}function ub64(s){return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
 async function derive(pass,salt){const base=await crypto.subtle.importKey('raw',enc.encode(pass),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
@@ -723,7 +731,7 @@ async function loadSettings(){const r=await fetch('/api/settings');if(!r.ok)retu
 $('settingsBtn').onclick=async()=>{$('settingsModal').classList.add('open');await loadSettings()};
 $('settingsClose').onclick=()=>$('settingsModal').classList.remove('open');
 $('settingsSave').onclick=async()=>{const r=await fetch('/api/settings',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({anti_analytics:$('antiAnalytics').checked})});if(!r.ok)return alert(await r.text());$('settingsModal').classList.remove('open');setStatus($('antiAnalytics').checked?'Analytics/tracking blocking enabled.':'Analytics/tracking blocking disabled.');};
-$('websiteBtn').onclick=()=>{$('websiteModal').classList.add('open');loadWebsites()};$('websiteCancel').onclick=()=>$('websiteModal').classList.remove('open');async function loadWebsites(){const r=await fetch('/api/websites');if(!r.ok)return;const list=await r.json();$('websiteList').innerHTML=list.length?'<h3>Published websites</h3>':'';for(const x of list){const row=document.createElement('div');row.style.cssText='padding:10px 0;border-bottom:1px solid #d8cbb9';row.innerHTML='<strong></strong><small style="display:block;color:var(--muted)"></small>';row.children[0].textContent=x.domain;row.children[1].textContent='WEBSITE: '+x.folder;const b=document.createElement('button');b.textContent='Unpublish';b.onclick=async()=>{await fetch('/api/websites/'+encodeURIComponent(x.name),{method:'DELETE'});loadWebsites()};const sand=document.createElement('button');sand.textContent=x.in_sandstorm?'✓ In SANDSTORM SEARCH':'Add to SANDSTORM SEARCH';sand.onclick=async()=>{const r=await fetch('/api/websites/'+encodeURIComponent(x.name)+'/sandstorm',{method:'POST'});if(!r.ok)return alert(await r.text());const y=await r.json();sand.textContent=y.in_sandstorm?'✓ In SANDSTORM SEARCH':'Add to SANDSTORM SEARCH'};row.appendChild(sand);row.appendChild(b);$('websiteList').appendChild(row)}}$('websitePublish').onclick=async()=>{const folder=$('websiteFolder').value.trim(),name=$('websiteName').value.trim()||folder.split('/').pop(),domain=$('websiteDomain').value.trim();if(!folder)return alert('Enter the WEBSITE folder.');const r=await fetch('/api/websites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder,name,domain})});if(!r.ok)return alert(await r.text());const x=await r.json();$('websiteDomain').value='';loadWebsites();setStatus('Website published at '+x.domain)};$('uploadBtn').onclick=upload;$('refreshBtn').onclick=load;$('downloadBtn').onclick=()=>{const tr=document.querySelector('#files tr.selected');if(tr)tr.querySelector('button').click();else alert('Select a file first.')};$('deleteBtn').onclick=del;$('vaultBtn').onclick=()=>{$('vaultModal').classList.add('open')};$('searchBtn').onclick=render;$('search').oninput=render;
+$('websiteBtn').onclick=()=>{$('websiteModal').classList.add('open');loadWebsites()};$('websiteCancel').onclick=()=>$('websiteModal').classList.remove('open');async function loadWebsites(){const r=await fetch('/api/websites');if(!r.ok)return;const list=await r.json();$('websiteList').innerHTML=list.length?'<h3>Published websites</h3>':'';for(const x of list){const row=document.createElement('div');row.style.cssText='padding:10px 0;border-bottom:1px solid #d8cbb9';row.innerHTML='<strong></strong><small style="display:block;color:var(--muted)"></small>';row.children[0].textContent=x.domain;row.children[1].textContent='WEBSITE: '+x.folder;const b=document.createElement('button');b.textContent=x.published?'Unpublish':'Publish';b.onclick=async()=>{const rr=await fetch('/api/websites/'+encodeURIComponent(x.name),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({published:!x.published})});if(!rr.ok)return alert(await rr.text());loadWebsites()};const sand=document.createElement('button');sand.textContent=x.in_sandstorm?'✓ In SANDSTORM SEARCH':'Add to SANDSTORM SEARCH';sand.onclick=async()=>{const r=await fetch('/api/websites/'+encodeURIComponent(x.name)+'/sandstorm',{method:'POST'});if(!r.ok)return alert(await r.text());const y=await r.json();sand.textContent=y.in_sandstorm?'✓ In SANDSTORM SEARCH':'Add to SANDSTORM SEARCH'};row.appendChild(sand);row.appendChild(b);$('websiteList').appendChild(row)}}$('websitePublish').onclick=async()=>{const folder=$('websiteFolder').value.trim(),name=$('websiteName').value.trim()||folder.split('/').pop(),domain=$('websiteDomain').value.trim(),deydn_name=$('websiteDeydn').value.trim();if(!folder)return alert('Enter the WEBSITE folder.');const r=await fetch('/api/websites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder,name,domain,deydn_name,hide_from_search:$('hideFromSearch').checked})});if(!r.ok)return alert(await r.text());const x=await r.json();$('websiteDomain').value='';$('websiteDeydn').value='';$('hideFromSearch').checked=false;loadWebsites();setStatus('Website published at '+x.domain)};$('uploadBtn').onclick=upload;$('refreshBtn').onclick=load;$('downloadBtn').onclick=()=>{const tr=document.querySelector('#files tr.selected');if(tr)tr.querySelector('button').click();else alert('Select a file first.')};$('deleteBtn').onclick=del;$('vaultBtn').onclick=()=>{$('vaultModal').classList.add('open')};$('searchBtn').onclick=render;$('search').oninput=render;
 async function loadConnections(){const r=await fetch('/api/connections');const list=await r.json();const box=$('connectionList');box.innerHTML='';for(const [id,name] of [['google','Google Drive'],['dropbox','Dropbox'],['onedrive','OneDrive']]){const x=list.find(v=>v.provider===id);const row=document.createElement('div');row.style.cssText='display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #d8cbb9';row.innerHTML='<span><strong>'+name+'</strong><small style="display:block;color:var(--muted)">'+(x?'Connected via '+x.mode:'Not connected')+'</small></span>';const b=document.createElement('button');b.textContent=x?'Disconnect':'Connect';b.onclick=async()=>{if(x){await fetch('/api/connections/'+id,{method:'DELETE'});loadConnections()}else location.href='/connect/'+id};row.appendChild(b);box.appendChild(row)}}function openConnections(){loadConnections();$('connectionsModal').classList.add('open')}$('connectionsBtn').onclick=openConnections;$('connectionsClose').onclick=()=>$('connectionsModal').classList.remove('open');$('tokenConnect').onclick=async()=>{const token=$('tokenValue').value.trim();if(!token)return alert('Paste a token first.');const r=await fetch('/api/connections/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:$('tokenProvider').value,token})});if(!r.ok)return alert(await r.text());$('tokenValue').value='';loadConnections();setStatus('Connection saved.')};loadSettings().catch(()=>{});load().catch(e=>setStatus('Could not load files: '+e.message));
 </script></body></html>'''
 
